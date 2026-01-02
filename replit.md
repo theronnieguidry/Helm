@@ -107,6 +107,23 @@ All endpoints require authentication except landing page.
 - Light and dark mode support
 - Consistent spacing and component usage per design_guidelines.md
 
+## Testing
+- Run `npx vitest run` to run all tests
+- Run `npx vitest` for watch mode
+- Run `npx vitest run --coverage` for coverage report
+
+### Test Files
+- `shared/dice.test.ts` - Unit tests for dice rolling utilities (65 tests)
+- `server/dice.api.test.ts` - Scenario tests for game-specific mechanics (30 tests)
+
+### Game-Specific Rules Tested
+- **D&D 5e/Pathfinder 2e**: Attack rolls, damage, saving throws, critical hits/misses
+- **World of Darkness (Vampire/Werewolf)**: 
+  - Success counting at difficulty threshold
+  - 1s cancel successes
+  - Botch detection (net successes <= 0 AND ones > 0)
+  - Difficulty ranges 1-10 (default 6)
+
 ## Development
 - Run `npm run dev` to start development server
 - Run `npm run db:push` to sync database schema
