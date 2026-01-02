@@ -29,6 +29,7 @@ export interface IStorage {
   getTeamMembers(teamId: string): Promise<(TeamMember & { user?: { firstName?: string | null; lastName?: string | null; profileImageUrl?: string | null; email?: string | null } })[]>;
   getTeamMember(teamId: string, userId: string): Promise<TeamMember | undefined>;
   createTeamMember(member: InsertTeamMember): Promise<TeamMember>;
+  updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null }): Promise<TeamMember>;
   deleteTeamMember(id: string): Promise<void>;
 
   // Invites
@@ -160,6 +161,15 @@ export class DatabaseStorage implements IStorage {
   async createTeamMember(member: InsertTeamMember): Promise<TeamMember> {
     const [created] = await db.insert(teamMembers).values(member).returning();
     return created;
+  }
+
+  async updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null }): Promise<TeamMember> {
+    const [updated] = await db
+      .update(teamMembers)
+      .set(data)
+      .where(eq(teamMembers.id, id))
+      .returning();
+    return updated;
   }
 
   async deleteTeamMember(id: string): Promise<void> {

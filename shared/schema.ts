@@ -21,8 +21,55 @@ export const TEAM_TYPE_LABELS: Record<TeamType, string> = {
   pathfinder_2e: "Pathfinder 2e",
   dnd: "Dungeons & Dragons",
   vampire: "Vampire: The Masquerade",
-  werewolf: "Werewolf: The Forsaken",
+  werewolf: "Werewolf: The Apocalypse",
   other: "Other"
+};
+
+// Game-specific terminology for character fields
+export type CharacterTerminology = {
+  gmTitle: string;
+  type1Label: string; // Race/Ancestry/Clan/Tribe
+  type2Label: string; // Class/Auspice (empty for Vampire)
+  type1Placeholder: string;
+  type2Placeholder: string;
+};
+
+export const GAME_TERMINOLOGY: Record<TeamType, CharacterTerminology> = {
+  dnd: {
+    gmTitle: "Dungeon Master",
+    type1Label: "Race",
+    type2Label: "Class",
+    type1Placeholder: "e.g., Human, Elf, Dwarf, Tiefling",
+    type2Placeholder: "e.g., Fighter, Wizard, Rogue, Cleric",
+  },
+  pathfinder_2e: {
+    gmTitle: "Game Master",
+    type1Label: "Ancestry",
+    type2Label: "Class",
+    type1Placeholder: "e.g., Human, Elf, Dwarf, Halfling",
+    type2Placeholder: "e.g., Fighter, Wizard, Rogue, Cleric",
+  },
+  vampire: {
+    gmTitle: "Storyteller",
+    type1Label: "Clan",
+    type2Label: "", // No class in Vampire
+    type1Placeholder: "e.g., Brujah, Ventrue, Toreador, Nosferatu",
+    type2Placeholder: "",
+  },
+  werewolf: {
+    gmTitle: "Storyteller",
+    type1Label: "Tribe",
+    type2Label: "Auspice",
+    type1Placeholder: "e.g., Bone Gnawers, Silver Fangs, Shadow Lords",
+    type2Placeholder: "e.g., Ragabash, Theurge, Philodox, Galliard, Ahroun",
+  },
+  other: {
+    gmTitle: "Organizer",
+    type1Label: "",
+    type2Label: "",
+    type1Placeholder: "",
+    type2Placeholder: "",
+  },
 };
 
 // Dice modes based on team type
@@ -64,6 +111,11 @@ export const teamMembers = pgTable("team_members", {
   teamId: varchar("team_id").notNull(),
   userId: varchar("user_id").notNull(),
   role: text("role").notNull().$type<"dm" | "member">(),
+  // Character information (optional, for tabletop gaming groups)
+  characterName: text("character_name"),
+  characterType1: text("character_type1"), // Race/Ancestry/Clan/Tribe depending on game
+  characterType2: text("character_type2"), // Class/Auspice depending on game
+  characterDescription: text("character_description"),
   joinedAt: timestamp("joined_at").defaultNow(),
 });
 

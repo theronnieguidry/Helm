@@ -155,6 +155,45 @@ export async function registerRoutes(
     }
   });
 
+  // Update team member character info
+  app.patch("/api/teams/:teamId/members/:memberId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, memberId } = req.params;
+      const { characterName, characterType1, characterType2, characterDescription } = req.body;
+      
+      // User can only update their own character info (or DM can update any)
+      const currentMember = await storage.getTeamMember(teamId, userId);
+      if (!currentMember) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+      
+      // Get the target member to check if it's the user's own membership
+      const members = await storage.getTeamMembers(teamId);
+      const targetMember = members.find(m => m.id === memberId);
+      if (!targetMember) {
+        return res.status(404).json({ message: "Member not found" });
+      }
+      
+      // Only allow updating own character info or if user is DM
+      if (targetMember.userId !== userId && currentMember.role !== "dm") {
+        return res.status(403).json({ message: "Not authorized to update this character" });
+      }
+
+      const updated = await storage.updateTeamMember(memberId, {
+        characterName: characterName ?? null,
+        characterType1: characterType1 ?? null,
+        characterType2: characterType2 ?? null,
+        characterDescription: characterDescription ?? null,
+      });
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating member:", error);
+      res.status(500).json({ message: "Failed to update member" });
+    }
+  });
+
   // Get invites
   app.get("/api/teams/:teamId/invites", isAuthenticated, async (req: any, res) => {
     try {
