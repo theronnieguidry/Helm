@@ -12,25 +12,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { 
-  Dices, 
+  Compass, 
   ChevronLeft, 
   ChevronRight, 
   Check, 
   Copy,
   Clock,
   Calendar,
-  Users
+  Users,
+  BookOpen,
+  Dices,
+  Heart,
+  Sparkles
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { 
-  TEAM_TYPES, 
-  TEAM_TYPE_LABELS, 
   TEAM_TYPE_DICE_MODE,
-  RECURRENCE_FREQUENCIES,
   type TeamType,
   type RecurrenceFrequency 
 } from "@shared/schema";
@@ -47,6 +47,39 @@ interface WizardData {
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
+const GROUP_TYPES = [
+  { 
+    value: "other" as TeamType, 
+    label: "General Meetup", 
+    description: "Book clubs, study groups, volunteer teams, and more",
+    icon: Users
+  },
+  { 
+    value: "dnd" as TeamType, 
+    label: "Dungeons & Dragons", 
+    description: "Fantasy adventures and epic quests",
+    icon: Dices
+  },
+  { 
+    value: "pathfinder_2e" as TeamType, 
+    label: "Pathfinder 2e", 
+    description: "Tactical fantasy roleplaying",
+    icon: Dices
+  },
+  { 
+    value: "vampire" as TeamType, 
+    label: "Vampire: The Masquerade", 
+    description: "Gothic horror and political intrigue",
+    icon: Heart
+  },
+  { 
+    value: "werewolf" as TeamType, 
+    label: "Werewolf: The Forsaken", 
+    description: "Primal horror and spiritual battles",
+    icon: Sparkles
+  },
+];
+
 export default function TeamWizard() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
@@ -55,7 +88,7 @@ export default function TeamWizard() {
     teamType: "",
     teamName: "",
     recurrenceFrequency: "",
-    dayOfWeek: 6, // Saturday
+    dayOfWeek: 6,
     daysOfMonth: [],
     startTime: "19:00",
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -88,7 +121,7 @@ export default function TeamWizard() {
     },
     onError: (error: Error) => {
       toast({
-        title: "Failed to create team",
+        title: "Couldn't create your group",
         description: error.message,
         variant: "destructive",
       });
@@ -97,9 +130,7 @@ export default function TeamWizard() {
 
   const progress = (step / 5) * 100;
 
-  const isLabelCampaign = data.teamType !== "other" && data.teamType !== "";
-  const nameLabel = isLabelCampaign ? "Campaign Name" : "Group Name";
-  const scheduleTitle = isLabelCampaign ? "Default Game Schedule" : "Default Meetup Schedule";
+  const isGaming = data.teamType !== "other" && data.teamType !== "";
 
   const canProceed = () => {
     switch (step) {
@@ -144,13 +175,15 @@ export default function TeamWizard() {
     }));
   };
 
+  const selectedGroupType = GROUP_TYPES.find(g => g.value === data.teamType);
+
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-lg">
         <div className="mb-8 text-center">
           <div className="flex items-center justify-center gap-2 mb-4">
-            <Dices className="h-8 w-8 text-primary" />
-            <span className="text-xl font-medium">Quest Keeper</span>
+            <Compass className="h-8 w-8 text-primary" />
+            <span className="text-xl font-medium">Helm</span>
           </div>
           <Progress value={progress} className="h-2" />
           <p className="text-sm text-muted-foreground mt-2">Step {step} of 5</p>
@@ -160,36 +193,35 @@ export default function TeamWizard() {
           {step === 1 && (
             <>
               <CardHeader>
-                <CardTitle>What type of group?</CardTitle>
+                <CardTitle>What kind of group are you starting?</CardTitle>
                 <CardDescription>
-                  Select the game system your group plays. This determines dice rolling options.
+                  Choose the type that best fits your meetups.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {TEAM_TYPES.map((type) => (
+                  {GROUP_TYPES.map((type) => (
                     <button
-                      key={type}
-                      onClick={() => setData({ ...data, teamType: type })}
+                      key={type.value}
+                      onClick={() => setData({ ...data, teamType: type.value })}
                       className={`w-full p-4 rounded-md border text-left transition-all hover-elevate ${
-                        data.teamType === type 
+                        data.teamType === type.value 
                           ? "border-primary bg-primary/5" 
                           : "border-border"
                       }`}
-                      data-testid={`team-type-${type}`}
+                      data-testid={`team-type-${type.value}`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">{TEAM_TYPE_LABELS[type]}</span>
-                        {data.teamType === type && (
+                        <div className="flex items-center gap-3">
+                          <type.icon className="h-5 w-5 text-muted-foreground" />
+                          <span className="font-medium">{type.label}</span>
+                        </div>
+                        {data.teamType === type.value && (
                           <Check className="h-5 w-5 text-primary" />
                         )}
                       </div>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        {type === "pathfinder_2e" || type === "dnd" 
-                          ? "Polyhedral dice (d4, d6, d8, d10, d12, d20, d100)"
-                          : type === "vampire" || type === "werewolf"
-                          ? "d10 dice pool system"
-                          : "Custom - dice disabled by default"}
+                      <p className="text-sm text-muted-foreground mt-1 ml-8">
+                        {type.description}
                       </p>
                     </button>
                   ))}
@@ -201,17 +233,17 @@ export default function TeamWizard() {
           {step === 2 && (
             <>
               <CardHeader>
-                <CardTitle>{nameLabel}</CardTitle>
+                <CardTitle>Give your group a name</CardTitle>
                 <CardDescription>
-                  Give your {isLabelCampaign ? "campaign" : "group"} a memorable name.
+                  Something memorable that your crew will recognize.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  <Label htmlFor="teamName">{nameLabel}</Label>
+                  <Label htmlFor="teamName">Group Name</Label>
                   <Input
                     id="teamName"
-                    placeholder={isLabelCampaign ? "e.g., The Dragon's Hoard" : "e.g., Friday Night Games"}
+                    placeholder={isGaming ? "e.g., The Dragon's Hoard" : "e.g., Friday Night Book Club"}
                     value={data.teamName}
                     onChange={(e) => setData({ ...data, teamName: e.target.value })}
                     data-testid="input-team-name"
@@ -224,14 +256,14 @@ export default function TeamWizard() {
           {step === 3 && (
             <>
               <CardHeader>
-                <CardTitle>{scheduleTitle}</CardTitle>
+                <CardTitle>Set your default schedule</CardTitle>
                 <CardDescription>
-                  Set up your regular meeting schedule. You can always override specific sessions later.
+                  Pick a recurring time that works for your crew. You can always adjust when life happens.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="space-y-2">
-                  <Label>Frequency</Label>
+                  <Label>How often do you meet?</Label>
                   <Select
                     value={data.recurrenceFrequency}
                     onValueChange={(value: RecurrenceFrequency) => 
@@ -243,7 +275,7 @@ export default function TeamWizard() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="weekly">Weekly</SelectItem>
-                      <SelectItem value="biweekly">Biweekly</SelectItem>
+                      <SelectItem value="biweekly">Every two weeks</SelectItem>
                       <SelectItem value="monthly">Monthly</SelectItem>
                     </SelectContent>
                   </Select>
@@ -251,7 +283,7 @@ export default function TeamWizard() {
 
                 {(data.recurrenceFrequency === "weekly" || data.recurrenceFrequency === "biweekly") && (
                   <div className="space-y-2">
-                    <Label>Day of Week</Label>
+                    <Label>Which day?</Label>
                     <Select
                       value={data.dayOfWeek.toString()}
                       onValueChange={(value) => setData({ ...data, dayOfWeek: parseInt(value) })}
@@ -270,8 +302,8 @@ export default function TeamWizard() {
 
                 {data.recurrenceFrequency === "monthly" && (
                   <div className="space-y-2">
-                    <Label>Days of Month</Label>
-                    <p className="text-sm text-muted-foreground mb-2">Select one or more days</p>
+                    <Label>Which days of the month?</Label>
+                    <p className="text-sm text-muted-foreground mb-2">Select one or more</p>
                     <div className="grid grid-cols-7 gap-1">
                       {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => (
                         <Button
@@ -291,7 +323,7 @@ export default function TeamWizard() {
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="startTime">Start Time</Label>
+                    <Label htmlFor="startTime">What time?</Label>
                     <div className="relative">
                       <Clock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <Input
@@ -321,26 +353,28 @@ export default function TeamWizard() {
           {step === 4 && (
             <>
               <CardHeader>
-                <CardTitle>Review & Create</CardTitle>
+                <CardTitle>Looking good!</CardTitle>
                 <CardDescription>
-                  Review your settings before creating the team.
+                  Review your group details before we create it.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="p-4 rounded-md bg-muted/50 space-y-3">
                   <div className="flex items-center gap-3">
-                    <Dices className="h-5 w-5 text-primary" />
+                    <Users className="h-5 w-5 text-primary" />
                     <div>
                       <p className="font-medium">{data.teamName}</p>
                       <p className="text-sm text-muted-foreground">
-                        {TEAM_TYPE_LABELS[data.teamType as TeamType]}
+                        {selectedGroupType?.label}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
                     <Calendar className="h-5 w-5 text-muted-foreground" />
                     <div>
-                      <p className="font-medium capitalize">{data.recurrenceFrequency}</p>
+                      <p className="font-medium capitalize">
+                        {data.recurrenceFrequency === "biweekly" ? "Every two weeks" : data.recurrenceFrequency}
+                      </p>
                       <p className="text-sm text-muted-foreground">
                         {data.recurrenceFrequency === "monthly" 
                           ? `Days: ${data.daysOfMonth.join(", ")}`
@@ -363,9 +397,9 @@ export default function TeamWizard() {
                 <div className="mx-auto mb-4 h-12 w-12 rounded-full bg-green-500/10 flex items-center justify-center">
                   <Check className="h-6 w-6 text-green-500" />
                 </div>
-                <CardTitle>Team Created!</CardTitle>
+                <CardTitle>You're all set!</CardTitle>
                 <CardDescription>
-                  Your team is ready. Share the invite code with your players.
+                  Your group is ready. Share this code with your people to invite them.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -388,7 +422,7 @@ export default function TeamWizard() {
                       </Button>
                     </div>
                     <p className="text-xs text-muted-foreground mt-3">
-                      Code expires in 7 days
+                      Expires in 7 days
                     </p>
                   </div>
                 )}
@@ -417,7 +451,7 @@ export default function TeamWizard() {
                     "Creating..."
                   ) : step === 4 ? (
                     <>
-                      Create Team
+                      Create Group
                       <Check className="h-4 w-4 ml-1" />
                     </>
                   ) : (

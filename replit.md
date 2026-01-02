@@ -1,13 +1,13 @@
-# Quest Keeper - Gaming Coordination & Organization App
+# Helm - Your Group Meetup Companion
 
 ## Overview
-A tabletop RPG gaming coordination app that helps Dungeon Masters and players manage teams, schedule recurring game sessions, create collaborative campaign notes, roll dice, and invite members. Supports multiple game systems including Pathfinder 2e, D&D, Vampire: The Masquerade, and Werewolf.
+Helm is a group coordination app that helps people plan, schedule, and connect — whether organizing a tabletop campaign, book club, running group, study session, or any recurring meetup. Features scheduling, collaborative notes, member management, and optional dice rolling for gaming groups.
 
 ## Tech Stack
 - **Frontend**: React + TypeScript, Vite, TanStack Query, Wouter routing, Shadcn UI components
 - **Backend**: Express.js, TypeScript
 - **Database**: PostgreSQL with Drizzle ORM
-- **Authentication**: Replit Auth (OpenID Connect)
+- **Authentication**: Replit Auth (OpenID Connect) - supports email/password and social login (Google, Apple, GitHub, X)
 - **Styling**: Tailwind CSS with Material Design principles, Roboto typography, purple accent colors
 
 ## Project Structure
@@ -20,14 +20,14 @@ A tabletop RPG gaming coordination app that helps Dungeon Masters and players ma
 │   │   └── ui/                # Shadcn components
 │   ├── pages/
 │   │   ├── landing.tsx        # Landing page for logged-out users
-│   │   ├── dashboard.tsx      # Main dashboard for team
-│   │   ├── team-wizard.tsx    # 5-step team creation wizard
+│   │   ├── dashboard.tsx      # Main dashboard for group
+│   │   ├── team-wizard.tsx    # 5-step group creation wizard
 │   │   ├── notes.tsx          # Notes management (CRUD)
 │   │   ├── dice.tsx           # Dice roller (polyhedral/d10 pool)
 │   │   ├── schedule.tsx       # Calendar and session scheduling
 │   │   ├── members.tsx        # Member management and invites
-│   │   ├── settings.tsx       # Team settings (DM only)
-│   │   └── join-team.tsx      # Join team via invite code
+│   │   ├── settings.tsx       # Group settings
+│   │   └── join-team.tsx      # Join group via invite code
 │   ├── hooks/
 │   │   └── use-auth.ts        # Authentication hook
 │   └── lib/
@@ -45,10 +45,10 @@ A tabletop RPG gaming coordination app that helps Dungeon Masters and players ma
 
 ## Key Features
 
-### Team Management
-- Create teams for different game systems (Pathfinder 2e, D&D, Vampire, Werewolf, Other)
+### Group Management
+- Create groups for any purpose (gaming, book clubs, study groups, fitness, etc.)
 - Invite members via 6-character invite codes (7-day expiry)
-- DM and Player roles with appropriate permissions
+- Admin and member roles with appropriate permissions
 
 ### Scheduling
 - Set recurring schedules (weekly, biweekly, monthly)
@@ -61,38 +61,39 @@ A tabletop RPG gaming coordination app that helps Dungeon Masters and players ma
 - Private or shared visibility
 - Full-text search and type filtering
 
-### Dice Roller
+### Dice Roller (for gaming groups)
 - Polyhedral mode: d4, d6, d8, d10, d12, d20, d100 with modifiers
 - d10 Pool mode: Configurable pool size and difficulty threshold
-- Roll history (personal and shared with team)
+- Roll history (personal and shared with group)
+- Disabled for non-gaming groups
 
 ## API Endpoints
 All endpoints require authentication except landing page.
 
-### Teams
-- `GET /api/teams` - Get user's teams
-- `POST /api/teams` - Create team
-- `PATCH /api/teams/:id` - Update team (DM only)
-- `DELETE /api/teams/:id` - Delete team (DM only)
+### Groups (Teams)
+- `GET /api/teams` - Get user's groups
+- `POST /api/teams` - Create group
+- `PATCH /api/teams/:id` - Update group (admin only)
+- `DELETE /api/teams/:id` - Delete group (admin only)
 
 ### Members
-- `GET /api/teams/:teamId/members` - Get team members
-- `DELETE /api/teams/:teamId/members/:memberId` - Remove member (DM only)
+- `GET /api/teams/:teamId/members` - Get group members
+- `DELETE /api/teams/:teamId/members/:memberId` - Remove member (admin only)
 
 ### Invites
 - `GET /api/teams/:teamId/invites` - Get active invites
-- `POST /api/teams/:teamId/invites` - Create invite (DM only)
-- `POST /api/invites/:code/join` - Join team via invite code
+- `POST /api/teams/:teamId/invites` - Create invite (admin only)
+- `POST /api/invites/:code/join` - Join group via invite code
 
 ### Notes
-- `GET /api/teams/:teamId/notes` - Get team notes
+- `GET /api/teams/:teamId/notes` - Get group notes
 - `POST /api/teams/:teamId/notes` - Create note
 - `PATCH /api/teams/:teamId/notes/:noteId` - Update note
 - `DELETE /api/teams/:teamId/notes/:noteId` - Delete note
 
 ### Sessions
-- `GET /api/teams/:teamId/sessions` - Get game sessions
-- `POST /api/teams/:teamId/sessions` - Create session (DM only)
+- `GET /api/teams/:teamId/sessions` - Get meetup sessions
+- `POST /api/teams/:teamId/sessions` - Create session (admin only)
 - `GET /api/teams/:teamId/availability` - Get all availability
 - `POST /api/teams/:teamId/sessions/:sessionId/availability` - Set availability
 

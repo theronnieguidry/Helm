@@ -7,7 +7,8 @@ import {
   Users, 
   Settings,
   Plus,
-  ChevronDown
+  ChevronDown,
+  Compass
 } from "lucide-react";
 import {
   Sidebar,
@@ -78,11 +79,11 @@ export function AppSidebar({ teams, currentTeam, onTeamSelect, onCreateTeam }: A
             >
               <div className="flex items-center gap-2 min-w-0">
                 <div className="h-8 w-8 rounded-md bg-primary/10 flex items-center justify-center flex-shrink-0">
-                  <Dices className="h-4 w-4 text-primary" />
+                  <Compass className="h-4 w-4 text-primary" />
                 </div>
                 <div className="text-left min-w-0">
                   <p className="text-sm font-medium truncate">
-                    {currentTeam?.name || "Select Team"}
+                    {currentTeam?.name || "Select Group"}
                   </p>
                   {currentTeam && (
                     <p className="text-xs text-muted-foreground truncate">
@@ -103,7 +104,7 @@ export function AppSidebar({ teams, currentTeam, onTeamSelect, onCreateTeam }: A
               >
                 <div className="flex items-center gap-2">
                   <div className="h-6 w-6 rounded-md bg-primary/10 flex items-center justify-center">
-                    <Dices className="h-3 w-3 text-primary" />
+                    <Compass className="h-3 w-3 text-primary" />
                   </div>
                   <span className="truncate">{team.name}</span>
                 </div>
@@ -112,7 +113,7 @@ export function AppSidebar({ teams, currentTeam, onTeamSelect, onCreateTeam }: A
             {teams.length > 0 && <DropdownMenuSeparator />}
             <DropdownMenuItem onClick={onCreateTeam} data-testid="menu-item-create-team">
               <Plus className="h-4 w-4 mr-2" />
-              Create New Team
+              Create New Group
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
