@@ -1,0 +1,275 @@
+# Gaming Coordination & Organization App  
+## Replit Build Directives (Authoritative Spec)
+
+---
+
+## 1. Core Goal
+Build a cross-platform coordination and organization app for tabletop and non-tabletop groups that supports:
+- Multiple teams or campaign groups per organizer (DM)
+- Flexible recurring scheduling with optional availability-based overrides
+- Collaborative notes (private and shared)
+- Media tools (sound and image generation)
+- Dice rolling (system-dependent)
+- Desktop-optimized companion experience
+- Future voice-to-text capture with AI cleanup and structuring
+
+---
+
+## 2. Roles & Teams
+
+### Roles
+- **Dungeon Master (DM)** – organizer with admin privileges
+- **Member** – participant
+
+### Team Rules
+- A DM may create **one or more teams**.
+- A user may belong to multiple teams.
+- Each team maintains its own:
+  - schedule
+  - notes
+  - media
+  - dice system
+  - members and permissions
+
+---
+
+## 3. Setup Wizard (Team Creation Flow)
+
+### Screen 1 — Team Type
+Dropdown (required):
+- Pathfinder 2e
+- Dungeons & Dragons
+- Vampire: The Masquerade
+- Werewolf: The Forsaken
+- Other
+
+Store as: `teamType`
+
+---
+
+### Screen 2 — Name (Dynamic Label)
+If `teamType` is not **Other**:
+- Label: **Campaign Name**
+
+If `teamType` is **Other**:
+- Label: **Group Name**
+
+Store as: `teamName`
+
+---
+
+### Screen 3 — Default Schedule / Default Meetup Schedule
+
+**Dynamic Title**
+- If `teamType` ≠ Other: **Default Game Schedule**
+- If `teamType` = Other: **Default Meetup Schedule**
+
+#### 3.1 Frequency (required)
+Dropdown:
+- Weekly
+- Biweekly
+- Monthly
+
+Store as: `recurrenceFrequency`  
+Values: `weekly | biweekly | monthly`
+
+#### 3.2 Day Selector (required)
+
+**Weekly or Biweekly**
+- Single-select weekday (Monday–Sunday)
+- Store as: `dayOfWeek` (0–6)
+
+**Monthly**
+- Multi-select day(s) of month (1–31)
+- Days beyond month length roll to last valid day
+- Store as: `daysOfMonth` (int[])
+
+#### 3.3 Time (required)
+- Time picker (local)
+- Store as: `startTime` (HH:MM)
+
+#### 3.4 Timezone (required)
+- Default to device timezone
+- Store as: `timezone` (IANA format)
+
+Optional:
+- `recurrenceAnchorDate` (used for biweekly cadence)
+
+---
+
+### Screen 4 — Invites
+
+#### Invite Link
+- Auto-generated deep link
+- One-tap copy
+
+#### Invite Code
+- 6-character alphanumeric code
+- One-tap copy
+- Default expiration: 7 days
+- Regeneratable
+
+---
+
+### Screen 5 — Main Dashboard
+- Redirect user to the team’s main dashboard upon completion
+
+---
+
+## 4. Dice System (Determined by Team Type)
+
+### Dice Mode A — Polyhedral
+Enabled for:
+- Pathfinder 2e
+- Dungeons & Dragons
+
+Supports:
+- d4, d6, d8, d10, d12, d20, d100
+- Modifiers
+- Presets
+- History
+- Animated rolls
+- Optional team sharing
+
+---
+
+### Dice Mode B — d10 Dice Pool
+Enabled for:
+- Vampire: The Masquerade
+- Werewolf: The Forsaken
+
+Supports:
+- Rolling N d10
+- Success counting
+- Configurable difficulty rules (future)
+
+---
+
+### Dice Mode C — Disabled by Default
+Used for:
+- Other
+
+- Dice roller hidden unless explicitly enabled later by organizer
+
+Store as: `diceMode`
+
+---
+
+## 5. Scheduling & Availability
+
+- Teams have a **default recurring schedule**.
+- Availability entry by members is **optional**.
+- DM can override a specific session date/time if availability allows.
+- DM sets a **minimum attendance threshold**.
+
+### Game-Day Notification
+If a session is scheduled and the threshold is met:
+- Send push notification at **12:00 PM local time** on game day:
+  > “Game is on today at [time].”
+
+### Availability Reminder (Optional)
+- Non-blocking reminder to update availability if none exists.
+
+---
+
+## 6. Notes System
+
+### Creation Permissions
+- **All members** can create notes.
+- Notes can be **private** or **team-shared**.
+
+### Supported Note Types
+- Locations / Cities
+- Characters
+- NPCs
+- Points of Interest
+- Quests / To-Do items
+
+### Relationships
+- Locations contain characters, NPCs, POIs
+- Quests link to NPCs and locations
+- Notes support wiki-style cross-referencing
+
+---
+
+## 7. Notes Import & AI Classification
+
+### Supported Imports
+- Microsoft OneNote
+- Evernote
+- Nuclino
+
+### AI Ingestion
+- AI scans imported content
+- Prompts user to classify detected names
+- Creates entities and links after confirmation
+
+---
+
+## 8. Sound & Ambience
+
+- Organizer can broadcast ambience sounds while app is open
+- Built-in public sound library
+- Upload local audio via file picker
+- Playback not forced if app is closed
+
+---
+
+## 9. Image Generation
+
+- Text-to-image generation via **Nano Banana Pro**
+- Use cases:
+  - characters
+  - locations
+  - scenes
+- Images saved to team media library
+- Attach images to notes/entities
+
+---
+
+## 10. Dashboard Behavior
+
+### Always Visible
+- Schedule summary
+- Notes overview
+- Invite management (DM only)
+
+### Conditional Modules
+- Dice roller (based on teamType)
+
+---
+
+## 11. Notifications
+
+- Game-day confirmation
+- Availability reminders
+- Invite confirmations (optional)
+
+All notifications:
+- Respect timezone
+- Respect user permissions
+
+---
+
+## 12. Phased Build Plan
+
+### Phase 1 (MVP)
+- Auth
+- Team creation wizard
+- Invites
+- Default scheduling + overrides
+- Notes (private/shared)
+- Dice roller (system-based)
+- Desktop-friendly web UI
+
+### Phase 2
+- Notes import + AI classification
+- Sound broadcasting
+- Image generation
+
+### Phase 3
+- Desktop wrapper
+- Voice-to-text notes
+- Advanced search and tagging
+
+---
