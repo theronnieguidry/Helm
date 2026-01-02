@@ -11,7 +11,13 @@ import {
 import { db } from "./db";
 import { eq, and, desc, gte } from "drizzle-orm";
 
+import type { User } from "@shared/schema";
+
 export interface IStorage {
+  // Users
+  getUser(id: string): Promise<User | undefined>;
+  updateUserTimezone(id: string, timezone: string): Promise<User>;
+
   // Teams
   getTeams(userId: string): Promise<Team[]>;
   getTeam(id: string): Promise<Team | undefined>;
@@ -64,6 +70,21 @@ function generateInviteCode(): string {
 }
 
 export class DatabaseStorage implements IStorage {
+  // Users
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async updateUserTimezone(id: string, timezone: string): Promise<User> {
+    const [updated] = await db
+      .update(users)
+      .set({ timezone, updatedAt: new Date() })
+      .where(eq(users.id, id))
+      .returning();
+    return updated;
+  }
+
   // Teams
   async getTeams(userId: string): Promise<Team[]> {
     const memberTeams = await db

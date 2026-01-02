@@ -21,6 +21,7 @@ import DicePage from "@/pages/dice";
 import SchedulePage from "@/pages/schedule";
 import MembersPage from "@/pages/members";
 import SettingsPage from "@/pages/settings";
+import ProfileSettingsPage from "@/pages/profile-settings";
 import JoinTeamPage from "@/pages/join-team";
 import NotFound from "@/pages/not-found";
 
@@ -124,6 +125,9 @@ function AuthenticatedApp() {
               </Route>
               <Route path="/settings">
                 <SettingsPage team={currentTeam} onTeamUpdate={handleTeamUpdate} />
+              </Route>
+              <Route path="/profile">
+                <ProfileSettingsPage />
               </Route>
               <Route component={NotFound} />
             </Switch>

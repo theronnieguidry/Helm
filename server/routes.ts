@@ -477,5 +477,40 @@ export async function registerRoutes(
     }
   });
 
+  // Update user timezone
+  app.patch("/api/user/timezone", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { timezone } = req.body;
+
+      if (!timezone || typeof timezone !== "string") {
+        return res.status(400).json({ message: "Timezone is required" });
+      }
+
+      const updatedUser = await storage.updateUserTimezone(userId, timezone);
+      res.json(updatedUser);
+    } catch (error) {
+      console.error("Error updating user timezone:", error);
+      res.status(500).json({ message: "Failed to update timezone" });
+    }
+  });
+
+  // Get user profile
+  app.get("/api/user/profile", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      res.json(user);
+    } catch (error) {
+      console.error("Error fetching user profile:", error);
+      res.status(500).json({ message: "Failed to fetch user profile" });
+    }
+  });
+
   return httpServer;
 }

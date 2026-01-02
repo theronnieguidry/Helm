@@ -162,6 +162,10 @@ export function AppSidebar({ teams, currentTeam, onTeamSelect, onCreateTeam }: A
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-[--radix-dropdown-menu-trigger-width]">
+            <DropdownMenuItem asChild data-testid="menu-item-profile">
+              <Link href="/profile">Profile Settings</Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => logout()} data-testid="menu-item-logout">
               Sign Out
             </DropdownMenuItem>
