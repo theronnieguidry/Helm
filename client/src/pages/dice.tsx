@@ -50,8 +50,27 @@ export default function DicePage({ team }: DicePageProps) {
   const [poolSize, setPoolSize] = useState(5);
   const [difficulty, setDifficulty] = useState(6);
   const [shareRoll, setShareRoll] = useState(false);
-  const [lastRoll, setLastRoll] = useState<{ results: number[]; total: number; successes?: number } | null>(null);
+  const [lastRoll, setLastRoll] = useState<{ 
+    results: number[]; 
+    total: number; 
+    successes?: number;
+    ones?: number;
+    netSuccesses?: number;
+    isBotch?: boolean;
+  } | null>(null);
   const [isRolling, setIsRolling] = useState(false);
+
+  // Calculate WoD dice pool results with proper mechanics
+  // Botch occurs when net successes (hits minus 1s) is zero or negative AND at least one 1 was rolled
+  const calculateWoDResults = (results: number[], diff: number) => {
+    const successes = results.filter(r => r >= diff).length;
+    const ones = results.filter(r => r === 1).length;
+    const rawNet = successes - ones;
+    const netSuccesses = Math.max(0, rawNet);
+    // Botch: when 1s cancel all successes (or there were none) and at least one 1 was rolled
+    const isBotch = rawNet <= 0 && ones > 0;
+    return { successes, ones, netSuccesses, isBotch };
+  };
 
   const { data: rollHistory } = useQuery<DiceRoll[]>({
     queryKey: ["/api/teams", team.id, "dice-rolls"],
@@ -65,11 +84,23 @@ export default function DicePage({ team }: DicePageProps) {
     },
     onSuccess: (roll) => {
       queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "dice-rolls"] });
-      setLastRoll({ 
-        results: roll.results, 
-        total: roll.total,
-        successes: team.diceMode === "d10_pool" ? roll.results.filter((r: number) => r >= difficulty).length : undefined
-      });
+      
+      if (team.diceMode === "d10_pool") {
+        const wodResults = calculateWoDResults(roll.results, difficulty);
+        setLastRoll({ 
+          results: roll.results, 
+          total: roll.total,
+          successes: wodResults.successes,
+          ones: wodResults.ones,
+          netSuccesses: wodResults.netSuccesses,
+          isBotch: wodResults.isBotch,
+        });
+      } else {
+        setLastRoll({ 
+          results: roll.results, 
+          total: roll.total,
+        });
+      }
       setIsRolling(false);
     },
     onError: (error: Error) => {
@@ -348,8 +379,12 @@ export default function DicePage({ team }: DicePageProps) {
                                 ? "bg-red-500/20 text-red-500 border border-red-500"
                                 : "bg-muted"
                               : result >= difficulty
-                              ? "bg-green-500/20 text-green-500 border border-green-500"
-                              : "bg-muted text-muted-foreground"
+                              ? result === 10
+                                ? "bg-green-500/20 text-green-500 border-2 border-green-500" // 10s are critical
+                                : "bg-green-500/20 text-green-500 border border-green-500" // Regular success
+                              : result === 1
+                              ? "bg-red-500/20 text-red-500 border border-red-500" // 1s cancel successes
+                              : "bg-muted text-muted-foreground" // Normal failure
                           }`}
                           data-testid={`result-die-${index}`}
                         >
@@ -371,12 +406,25 @@ export default function DicePage({ team }: DicePageProps) {
                         </div>
                       ) : (
                         <div>
-                          <p className="text-4xl font-bold text-primary" data-testid="result-successes">
-                            {lastRoll.successes} {lastRoll.successes === 1 ? "Success" : "Successes"}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            {lastRoll.results.filter(r => r >= difficulty).length} of {lastRoll.results.length} dice
-                          </p>
+                          {lastRoll.isBotch ? (
+                            <>
+                              <p className="text-4xl font-bold text-red-500" data-testid="result-botch">
+                                BOTCH!
+                              </p>
+                              <p className="text-sm text-red-400">
+                                No successes and {lastRoll.ones} {lastRoll.ones === 1 ? "one was" : "ones were"} rolled
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className={`text-4xl font-bold ${(lastRoll.netSuccesses ?? 0) > 0 ? "text-primary" : "text-muted-foreground"}`} data-testid="result-successes">
+                                {lastRoll.netSuccesses} {lastRoll.netSuccesses === 1 ? "Success" : "Successes"}
+                              </p>
+                              <p className="text-sm text-muted-foreground">
+                                {lastRoll.successes} {lastRoll.successes === 1 ? "hit" : "hits"} - {lastRoll.ones} {lastRoll.ones === 1 ? "one" : "ones"} = {lastRoll.netSuccesses} net
+                              </p>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
