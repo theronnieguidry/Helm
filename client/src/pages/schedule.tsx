@@ -25,13 +25,15 @@ import {
   ChevronRight,
   Check,
   X,
-  HelpCircle
+  HelpCircle,
+  Globe
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import type { Team, GameSession, Availability, TeamMember, AvailabilityStatus } from "@shared/schema";
+import type { Team, GameSession, Availability, TeamMember, AvailabilityStatus, User } from "@shared/schema";
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay, addMonths, subMonths, isToday } from "date-fns";
+import { getTimezoneAbbreviation } from "@/components/timezone-select";
 
 interface SchedulePageProps {
   team: Team;
@@ -42,6 +44,41 @@ const AVAILABILITY_OPTIONS: { status: AvailabilityStatus; icon: typeof Check; la
   { status: "maybe", icon: HelpCircle, label: "Maybe", color: "bg-yellow-500" },
   { status: "busy", icon: X, label: "Busy", color: "bg-red-500" },
 ];
+
+function formatTimeInUserTimezone(date: Date, userTimezone: string): string {
+  try {
+    return date.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: userTimezone,
+    });
+  } catch {
+    return format(date, "h:mm a");
+  }
+}
+
+function formatDateTimeInUserTimezone(date: Date, userTimezone: string, formatStr: string): string {
+  try {
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: userTimezone,
+    };
+    
+    if (formatStr.includes("EEE")) {
+      options.weekday = "short";
+    }
+    if (formatStr.includes("MMM")) {
+      options.month = "short";
+    }
+    if (formatStr.includes("d")) {
+      options.day = "numeric";
+    }
+    
+    return date.toLocaleDateString("en-US", options);
+  } catch {
+    return format(date, formatStr);
+  }
+}
 
 export default function SchedulePage({ team }: SchedulePageProps) {
   const { toast } = useToast();
@@ -69,6 +106,14 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     queryKey: ["/api/teams", team.id, "availability"],
     enabled: !!team.id,
   });
+
+  const { data: userProfile } = useQuery<User>({
+    queryKey: ["/api/user/profile"],
+  });
+
+  const userTimezone = userProfile?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const teamTimezone = team.timezone || "America/New_York";
+  const timezonesMatch = userTimezone === teamTimezone;
 
   const isDM = members?.find(m => m.userId === user?.id)?.role === "dm";
 
@@ -144,6 +189,17 @@ export default function SchedulePage({ team }: SchedulePageProps) {
         )}
       </div>
 
+      {!timezonesMatch && (
+        <div className="mb-6 p-3 rounded-md bg-muted/50 border flex items-center gap-3">
+          <Globe className="h-5 w-5 text-primary flex-shrink-0" />
+          <div className="text-sm">
+            <span className="font-medium">Times shown in your timezone</span>
+            <span className="text-muted-foreground"> ({getTimezoneAbbreviation(userTimezone)}). </span>
+            <span className="text-muted-foreground">Group schedule is set in {getTimezoneAbbreviation(teamTimezone)}.</span>
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <Card>
@@ -210,7 +266,7 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                               className="w-full text-xs p-1 rounded bg-primary/10 text-primary font-medium truncate hover:bg-primary/20 transition-colors"
                               data-testid={`session-marker-${session.id}`}
                             >
-                              {format(new Date(session.scheduledAt), "h:mm a")}
+                              {formatTimeInUserTimezone(new Date(session.scheduledAt), userTimezone)}
                             </button>
                           ))}
                         </div>
@@ -256,10 +312,10 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                         <div className="flex items-center justify-between mb-2">
                           <div>
                             <p className="font-medium">
-                              {format(new Date(session.scheduledAt), "EEE, MMM d")}
+                              {formatDateTimeInUserTimezone(new Date(session.scheduledAt), userTimezone, "EEE, MMM d")}
                             </p>
                             <p className="text-sm text-muted-foreground">
-                              {format(new Date(session.scheduledAt), "h:mm a")}
+                              {formatTimeInUserTimezone(new Date(session.scheduledAt), userTimezone)} {getTimezoneAbbreviation(userTimezone)}
                             </p>
                           </div>
                           {myAvail && (
@@ -320,6 +376,12 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                     <div className="flex items-center gap-2">
                       <Clock className="h-4 w-4 text-muted-foreground" />
                       <span>{team.startTime}</span>
+                    </div>
+                  )}
+                  {teamTimezone && (
+                    <div className="flex items-center gap-2">
+                      <Globe className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-muted-foreground">{getTimezoneAbbreviation(teamTimezone)}</span>
                     </div>
                   )}
                 </div>
