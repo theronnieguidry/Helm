@@ -69,13 +69,18 @@ export default function LandingPage() {
                 Quest Keeper helps tabletop gaming groups schedule sessions, manage campaign notes, 
                 roll dice, and stay organized. Perfect for Dungeon Masters and players alike.
               </p>
-              <div className="flex flex-col sm:flex-row gap-4">
-                <Button size="lg" asChild data-testid="button-get-started">
-                  <a href="/api/login">Get Started Free</a>
-                </Button>
-                <Button size="lg" variant="outline" data-testid="button-learn-more">
-                  Learn More
-                </Button>
+              <div className="flex flex-col items-center gap-4">
+                <div className="flex flex-col sm:flex-row gap-4">
+                  <Button size="lg" asChild data-testid="button-get-started">
+                    <a href="/api/login">Get Started Free</a>
+                  </Button>
+                  <Button size="lg" variant="outline" data-testid="button-learn-more">
+                    Learn More
+                  </Button>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Sign up with email or continue with Google, Apple, GitHub
+                </p>
               </div>
             </div>
           </div>
