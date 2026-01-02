@@ -1,22 +1,59 @@
 import type { IStorage } from "../storage";
-import type {
-  Team, InsertTeam,
-  TeamMember, InsertTeamMember,
-  Invite, InsertInvite,
-  Note, InsertNote,
-  GameSession, InsertGameSession,
-  Availability, InsertAvailability,
-  DiceRoll, InsertDiceRoll,
-  User,
-  TeamType,
-  DiceMode,
-  RecurrenceFrequency,
-  NoteType,
-  AvailabilityStatus,
+import {
+  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS,
+  type Team, type InsertTeam,
+  type TeamMember, type InsertTeamMember,
+  type Invite, type InsertInvite,
+  type Note, type InsertNote,
+  type GameSession, type InsertGameSession,
+  type Availability, type InsertAvailability,
+  type DiceRoll, type InsertDiceRoll,
+  type User,
+  type TeamType,
+  type DiceMode,
+  type RecurrenceFrequency,
+  type NoteType,
+  type AvailabilityStatus,
 } from "@shared/schema";
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+function validateTeamType(value: string): TeamType {
+  if (!TEAM_TYPES.includes(value as TeamType)) {
+    throw new Error(`Invalid team type: ${value}`);
+  }
+  return value as TeamType;
+}
+
+function validateDiceMode(value: string): DiceMode {
+  if (!DICE_MODES.includes(value as DiceMode)) {
+    throw new Error(`Invalid dice mode: ${value}`);
+  }
+  return value as DiceMode;
+}
+
+function validateRecurrenceFrequency(value: string | null | undefined): RecurrenceFrequency | null {
+  if (value === null || value === undefined) return null;
+  if (!RECURRENCE_FREQUENCIES.includes(value as RecurrenceFrequency)) {
+    throw new Error(`Invalid recurrence frequency: ${value}`);
+  }
+  return value as RecurrenceFrequency;
+}
+
+function validateNoteType(value: string): NoteType {
+  if (!NOTE_TYPES.includes(value as NoteType)) {
+    throw new Error(`Invalid note type: ${value}`);
+  }
+  return value as NoteType;
+}
+
+function validateAvailabilityStatus(value: string): AvailabilityStatus {
+  if (!AVAILABILITY_STATUS.includes(value as AvailabilityStatus)) {
+    throw new Error(`Invalid availability status: ${value}`);
+  }
+  return value as AvailabilityStatus;
 }
 
 export class MemoryStorage implements IStorage {
@@ -58,13 +95,17 @@ export class MemoryStorage implements IStorage {
 
   async createTeam(team: InsertTeam): Promise<Team> {
     const id = generateId();
+    const teamType = validateTeamType(team.teamType);
+    const diceMode = validateDiceMode(team.diceMode ?? "polyhedral");
+    const recurrenceFrequency = validateRecurrenceFrequency(team.recurrenceFrequency);
+    
     const newTeam: Team = {
       id,
       name: team.name,
-      teamType: team.teamType as TeamType,
-      diceMode: (team.diceMode ?? "polyhedral") as DiceMode,
+      teamType,
+      diceMode,
       ownerId: team.ownerId,
-      recurrenceFrequency: (team.recurrenceFrequency ?? null) as RecurrenceFrequency | null,
+      recurrenceFrequency,
       dayOfWeek: team.dayOfWeek ?? null,
       daysOfMonth: team.daysOfMonth as number[] ?? null,
       startTime: team.startTime ?? null,
@@ -198,13 +239,15 @@ export class MemoryStorage implements IStorage {
 
   async createNote(note: InsertNote): Promise<Note> {
     const id = generateId();
+    const noteType = validateNoteType(note.noteType ?? "location");
+    
     const newNote: Note = {
       id,
       teamId: note.teamId,
       authorId: note.authorId,
       title: note.title,
       content: note.content ?? null,
-      noteType: (note.noteType ?? "location") as NoteType,
+      noteType,
       isPrivate: note.isPrivate ?? false,
       parentNoteId: note.parentNoteId ?? null,
       linkedNoteIds: (note.linkedNoteIds as string[]) ?? [],
@@ -271,11 +314,13 @@ export class MemoryStorage implements IStorage {
   }
 
   async upsertAvailability(data: InsertAvailability): Promise<Availability> {
+    const status = validateAvailabilityStatus(data.status);
+    
     const existing = Array.from(this.availabilityMap.values()).find(
       a => a.sessionId === data.sessionId && a.userId === data.userId
     );
     if (existing) {
-      const updated: Availability = { ...existing, status: data.status as AvailabilityStatus };
+      const updated: Availability = { ...existing, status };
       this.availabilityMap.set(existing.id, updated);
       return updated;
     }
@@ -284,7 +329,7 @@ export class MemoryStorage implements IStorage {
       id,
       sessionId: data.sessionId,
       userId: data.userId,
-      status: data.status as AvailabilityStatus,
+      status,
       createdAt: new Date(),
     };
     this.availabilityMap.set(id, newAvailability);
