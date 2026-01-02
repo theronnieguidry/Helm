@@ -33,6 +33,7 @@ import {
   type RecurrenceFrequency 
 } from "@shared/schema";
 import helmLogo from "@assets/b8bc77e2-60e2-4834-9e6b-e7ea3b744612_1767318501377.png";
+import { TimezoneSelect, getTimezoneAbbreviation } from "@/components/timezone-select";
 
 type GroupCategory = "tabletop" | "club" | "study" | "";
 
@@ -416,7 +417,7 @@ export default function TeamWizard() {
                   </div>
                 )}
 
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="startTime">What time?</Label>
                     <div className="relative">
@@ -432,12 +433,14 @@ export default function TeamWizard() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="timezone">Timezone</Label>
-                    <Input
-                      id="timezone"
+                    <Label htmlFor="timezone">Your timezone</Label>
+                    <p className="text-sm text-muted-foreground">
+                      This sets the group's default timezone. Members will see times converted to their own timezone.
+                    </p>
+                    <TimezoneSelect
                       value={data.timezone}
-                      onChange={(e) => setData({ ...data, timezone: e.target.value })}
-                      data-testid="input-timezone"
+                      onValueChange={(value) => setData({ ...data, timezone: value })}
+                      data-testid="select-timezone"
                     />
                   </div>
                 </div>
@@ -479,7 +482,7 @@ export default function TeamWizard() {
                   </div>
                   <div className="flex items-center gap-3">
                     <Clock className="h-5 w-5 text-muted-foreground" />
-                    <p className="text-sm">{data.timezone}</p>
+                    <p className="text-sm">{getTimezoneAbbreviation(data.timezone)} ({data.timezone})</p>
                   </div>
                 </div>
               </CardContent>
