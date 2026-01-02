@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { 
-  Compass, 
   ChevronLeft, 
   ChevronRight, 
   Check, 
@@ -22,10 +21,9 @@ import {
   Clock,
   Calendar,
   Users,
-  BookOpen,
   Dices,
-  Heart,
-  Sparkles
+  BookOpen,
+  GraduationCap
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -34,8 +32,12 @@ import {
   type TeamType,
   type RecurrenceFrequency 
 } from "@shared/schema";
+import helmLogo from "@assets/b8bc77e2-60e2-4834-9e6b-e7ea3b744612_1767318501377.png";
+
+type GroupCategory = "tabletop" | "club" | "study" | "";
 
 interface WizardData {
+  groupCategory: GroupCategory;
   teamType: TeamType | "";
   teamName: string;
   recurrenceFrequency: RecurrenceFrequency | "";
@@ -47,36 +49,47 @@ interface WizardData {
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-const GROUP_TYPES = [
+const GROUP_CATEGORIES = [
   { 
-    value: "other" as TeamType, 
-    label: "General Meetup", 
-    description: "Book clubs, study groups, volunteer teams, and more",
-    icon: Users
+    value: "tabletop" as GroupCategory, 
+    label: "Tabletop Gaming", 
+    description: "D&D, Pathfinder, Vampire, and other tabletop RPGs",
+    icon: Dices
   },
+  { 
+    value: "club" as GroupCategory, 
+    label: "Book / Running / Hobby Club", 
+    description: "Book clubs, running groups, hobby circles, and more",
+    icon: BookOpen
+  },
+  { 
+    value: "study" as GroupCategory, 
+    label: "Study Group", 
+    description: "Study sessions, tutoring, or academic meetups",
+    icon: GraduationCap
+  },
+];
+
+const GAME_SYSTEMS = [
   { 
     value: "dnd" as TeamType, 
     label: "Dungeons & Dragons", 
-    description: "Fantasy adventures and epic quests",
-    icon: Dices
+    description: "Fantasy adventures and epic quests"
   },
   { 
     value: "pathfinder_2e" as TeamType, 
     label: "Pathfinder 2e", 
-    description: "Tactical fantasy roleplaying",
-    icon: Dices
+    description: "Tactical fantasy roleplaying"
   },
   { 
     value: "vampire" as TeamType, 
     label: "Vampire: The Masquerade", 
-    description: "Gothic horror and political intrigue",
-    icon: Heart
+    description: "Gothic horror and political intrigue"
   },
   { 
     value: "werewolf" as TeamType, 
     label: "Werewolf: The Forsaken", 
-    description: "Primal horror and spiritual battles",
-    icon: Sparkles
+    description: "Primal horror and spiritual battles"
   },
 ];
 
@@ -85,6 +98,7 @@ export default function TeamWizard() {
   const { toast } = useToast();
   const [step, setStep] = useState(1);
   const [data, setData] = useState<WizardData>({
+    groupCategory: "",
     teamType: "",
     teamName: "",
     recurrenceFrequency: "",
@@ -97,12 +111,16 @@ export default function TeamWizard() {
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
 
+  const isTabletop = data.groupCategory === "tabletop";
+  const totalSteps = isTabletop ? 6 : 5;
+
   const createTeamMutation = useMutation({
     mutationFn: async (teamData: WizardData) => {
+      const finalTeamType = teamData.teamType || "other";
       const response = await apiRequest("POST", "/api/teams", {
         name: teamData.teamName,
-        teamType: teamData.teamType,
-        diceMode: TEAM_TYPE_DICE_MODE[teamData.teamType as TeamType],
+        teamType: finalTeamType,
+        diceMode: TEAM_TYPE_DICE_MODE[finalTeamType as TeamType],
         recurrenceFrequency: teamData.recurrenceFrequency || null,
         dayOfWeek: teamData.recurrenceFrequency === "weekly" || teamData.recurrenceFrequency === "biweekly" 
           ? teamData.dayOfWeek 
@@ -117,7 +135,7 @@ export default function TeamWizard() {
       setCreatedTeamId(team.id);
       setInviteCode(team.invite?.code);
       queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
-      setStep(5);
+      setStep(totalSteps);
     },
     onError: (error: Error) => {
       toast({
@@ -128,30 +146,62 @@ export default function TeamWizard() {
     },
   });
 
-  const progress = (step / 5) * 100;
+  const progress = (step / totalSteps) * 100;
 
-  const isGaming = data.teamType !== "other" && data.teamType !== "";
+  const getStepContent = () => {
+    if (isTabletop) {
+      switch (step) {
+        case 1: return "category";
+        case 2: return "game";
+        case 3: return "name";
+        case 4: return "schedule";
+        case 5: return "review";
+        case 6: return "complete";
+        default: return "category";
+      }
+    } else {
+      switch (step) {
+        case 1: return "category";
+        case 2: return "name";
+        case 3: return "schedule";
+        case 4: return "review";
+        case 5: return "complete";
+        default: return "category";
+      }
+    }
+  };
+
+  const currentContent = getStepContent();
 
   const canProceed = () => {
-    switch (step) {
-      case 1: return data.teamType !== "";
-      case 2: return data.teamName.trim() !== "";
-      case 3: return data.recurrenceFrequency !== "" && data.startTime !== "";
-      case 4: return true;
+    switch (currentContent) {
+      case "category": return data.groupCategory !== "";
+      case "game": return data.teamType !== "";
+      case "name": return data.teamName.trim() !== "";
+      case "schedule": return data.recurrenceFrequency !== "" && data.startTime !== "";
+      case "review": return true;
       default: return true;
     }
   };
 
   const handleNext = () => {
-    if (step === 4) {
+    if (currentContent === "review") {
       createTeamMutation.mutate(data);
-    } else if (step < 5) {
+    } else if (step < totalSteps) {
       setStep(step + 1);
     }
   };
 
   const handleBack = () => {
     if (step > 1) setStep(step - 1);
+  };
+
+  const handleCategorySelect = (category: GroupCategory) => {
+    if (category !== "tabletop") {
+      setData({ ...data, groupCategory: category, teamType: "other" });
+    } else {
+      setData({ ...data, groupCategory: category, teamType: "" });
+    }
   };
 
   const handleFinish = () => {
@@ -175,22 +225,30 @@ export default function TeamWizard() {
     }));
   };
 
-  const selectedGroupType = GROUP_TYPES.find(g => g.value === data.teamType);
+  const getCategoryLabel = () => {
+    const category = GROUP_CATEGORIES.find(c => c.value === data.groupCategory);
+    return category?.label || "";
+  };
+
+  const getGameLabel = () => {
+    const game = GAME_SYSTEMS.find(g => g.value === data.teamType);
+    return game?.label || "";
+  };
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-lg">
         <div className="mb-8 text-center">
           <div className="flex items-center justify-center gap-2 mb-4">
-            <Compass className="h-8 w-8 text-primary" />
+            <img src={helmLogo} alt="Helm" className="h-8 w-8" />
             <span className="text-xl font-medium">Helm</span>
           </div>
           <Progress value={progress} className="h-2" />
-          <p className="text-sm text-muted-foreground mt-2">Step {step} of 5</p>
+          <p className="text-sm text-muted-foreground mt-2">Step {step} of {totalSteps}</p>
         </div>
 
         <Card className="shadow-md">
-          {step === 1 && (
+          {currentContent === "category" && (
             <>
               <CardHeader>
                 <CardTitle>What kind of group are you starting?</CardTitle>
@@ -200,28 +258,28 @@ export default function TeamWizard() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {GROUP_TYPES.map((type) => (
+                  {GROUP_CATEGORIES.map((category) => (
                     <button
-                      key={type.value}
-                      onClick={() => setData({ ...data, teamType: type.value })}
+                      key={category.value}
+                      onClick={() => handleCategorySelect(category.value)}
                       className={`w-full p-4 rounded-md border text-left transition-all hover-elevate ${
-                        data.teamType === type.value 
+                        data.groupCategory === category.value 
                           ? "border-primary bg-primary/5" 
                           : "border-border"
                       }`}
-                      data-testid={`team-type-${type.value}`}
+                      data-testid={`category-${category.value}`}
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                          <type.icon className="h-5 w-5 text-muted-foreground" />
-                          <span className="font-medium">{type.label}</span>
+                          <category.icon className="h-5 w-5 text-muted-foreground" />
+                          <span className="font-medium">{category.label}</span>
                         </div>
-                        {data.teamType === type.value && (
+                        {data.groupCategory === category.value && (
                           <Check className="h-5 w-5 text-primary" />
                         )}
                       </div>
                       <p className="text-sm text-muted-foreground mt-1 ml-8">
-                        {type.description}
+                        {category.description}
                       </p>
                     </button>
                   ))}
@@ -230,7 +288,44 @@ export default function TeamWizard() {
             </>
           )}
 
-          {step === 2 && (
+          {currentContent === "game" && (
+            <>
+              <CardHeader>
+                <CardTitle>Which game system?</CardTitle>
+                <CardDescription>
+                  Select the game your group plays.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {GAME_SYSTEMS.map((game) => (
+                    <button
+                      key={game.value}
+                      onClick={() => setData({ ...data, teamType: game.value })}
+                      className={`w-full p-4 rounded-md border text-left transition-all hover-elevate ${
+                        data.teamType === game.value 
+                          ? "border-primary bg-primary/5" 
+                          : "border-border"
+                      }`}
+                      data-testid={`game-${game.value}`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">{game.label}</span>
+                        {data.teamType === game.value && (
+                          <Check className="h-5 w-5 text-primary" />
+                        )}
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {game.description}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              </CardContent>
+            </>
+          )}
+
+          {currentContent === "name" && (
             <>
               <CardHeader>
                 <CardTitle>Give your group a name</CardTitle>
@@ -243,7 +338,7 @@ export default function TeamWizard() {
                   <Label htmlFor="teamName">Group Name</Label>
                   <Input
                     id="teamName"
-                    placeholder={isGaming ? "e.g., The Dragon's Hoard" : "e.g., Friday Night Book Club"}
+                    placeholder={isTabletop ? "e.g., The Dragon's Hoard" : "e.g., Friday Night Book Club"}
                     value={data.teamName}
                     onChange={(e) => setData({ ...data, teamName: e.target.value })}
                     data-testid="input-team-name"
@@ -253,7 +348,7 @@ export default function TeamWizard() {
             </>
           )}
 
-          {step === 3 && (
+          {currentContent === "schedule" && (
             <>
               <CardHeader>
                 <CardTitle>Set your default schedule</CardTitle>
@@ -350,7 +445,7 @@ export default function TeamWizard() {
             </>
           )}
 
-          {step === 4 && (
+          {currentContent === "review" && (
             <>
               <CardHeader>
                 <CardTitle>Looking good!</CardTitle>
@@ -365,7 +460,7 @@ export default function TeamWizard() {
                     <div>
                       <p className="font-medium">{data.teamName}</p>
                       <p className="text-sm text-muted-foreground">
-                        {selectedGroupType?.label}
+                        {isTabletop ? getGameLabel() : getCategoryLabel()}
                       </p>
                     </div>
                   </div>
@@ -391,7 +486,7 @@ export default function TeamWizard() {
             </>
           )}
 
-          {step === 5 && (
+          {currentContent === "complete" && (
             <>
               <CardHeader className="text-center">
                 <div className="mx-auto mb-4 h-12 w-12 rounded-full bg-green-500/10 flex items-center justify-center">
@@ -431,7 +526,7 @@ export default function TeamWizard() {
           )}
 
           <CardFooter className="flex justify-between gap-4">
-            {step < 5 ? (
+            {currentContent !== "complete" ? (
               <>
                 <Button 
                   variant="ghost" 
@@ -449,7 +544,7 @@ export default function TeamWizard() {
                 >
                   {createTeamMutation.isPending ? (
                     "Creating..."
-                  ) : step === 4 ? (
+                  ) : currentContent === "review" ? (
                     <>
                       Create Group
                       <Check className="h-4 w-4 ml-1" />

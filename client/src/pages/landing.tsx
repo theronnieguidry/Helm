@@ -1,7 +1,8 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Compass, Calendar, BookOpen, Users, Dices, Sparkles } from "lucide-react";
+import { Calendar, BookOpen, Users, Dices, Sparkles } from "lucide-react";
+import helmLogo from "@assets/b8bc77e2-60e2-4834-9e6b-e7ea3b744612_1767318501377.png";
 
 export default function LandingPage() {
   const features = [
@@ -41,7 +42,7 @@ export default function LandingPage() {
       <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container flex h-16 items-center justify-between gap-4 px-4 mx-auto max-w-7xl">
           <div className="flex items-center gap-2">
-            <Compass className="h-8 w-8 text-primary" />
+            <img src={helmLogo} alt="Helm" className="h-8 w-8" />
             <span className="text-xl font-medium">Helm</span>
           </div>
           <div className="flex items-center gap-2">
@@ -179,7 +180,7 @@ export default function LandingPage() {
         <div className="container px-4 mx-auto max-w-7xl">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-2 text-muted-foreground">
-              <Compass className="h-5 w-5" />
+              <img src={helmLogo} alt="Helm" className="h-5 w-5" />
               <span className="text-sm">Helm</span>
             </div>
             <p className="text-sm text-muted-foreground">

@@ -7,9 +7,9 @@ import {
   Users, 
   Settings,
   Plus,
-  ChevronDown,
-  Compass
+  ChevronDown
 } from "lucide-react";
+import helmLogo from "@assets/b8bc77e2-60e2-4834-9e6b-e7ea3b744612_1767318501377.png";
 import {
   Sidebar,
   SidebarContent,
@@ -78,9 +78,7 @@ export function AppSidebar({ teams, currentTeam, onTeamSelect, onCreateTeam }: A
               data-testid="button-team-selector"
             >
               <div className="flex items-center gap-2 min-w-0">
-                <div className="h-8 w-8 rounded-md bg-primary/10 flex items-center justify-center flex-shrink-0">
-                  <Compass className="h-4 w-4 text-primary" />
-                </div>
+                <img src={helmLogo} alt="Helm" className="h-8 w-8 flex-shrink-0" />
                 <div className="text-left min-w-0">
                   <p className="text-sm font-medium truncate">
                     {currentTeam?.name || "Select Group"}
@@ -103,9 +101,7 @@ export function AppSidebar({ teams, currentTeam, onTeamSelect, onCreateTeam }: A
                 data-testid={`menu-item-team-${team.id}`}
               >
                 <div className="flex items-center gap-2">
-                  <div className="h-6 w-6 rounded-md bg-primary/10 flex items-center justify-center">
-                    <Compass className="h-3 w-3 text-primary" />
-                  </div>
+                  <img src={helmLogo} alt="" className="h-6 w-6" />
                   <span className="truncate">{team.name}</span>
                 </div>
               </DropdownMenuItem>
