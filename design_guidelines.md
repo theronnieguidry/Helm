@@ -1,115 +1,95 @@
 # Gaming Coordination & Organization App - Design Guidelines
 
 ## Design Approach: Material Design System
+Material Design provides robust patterns for this productivity-focused coordination tool, supporting complex features (scheduling, notes, dice rolling, team management) with consistent, learnable interfaces while enabling interactive gaming moments.
 
-**Rationale**: This productivity-focused coordination tool requires consistent, learnable patterns for complex features (scheduling, notes, dice rolling, team management). Material Design provides robust component patterns for data-dense interfaces while supporting the interactive moments (dice rolls, sound broadcasting) that enhance the gaming experience.
+## Color System
 
-## Typography System
+**Light Mode**:
+- Background: Gray-50 (surface), White (elevated cards)
+- Text: Gray-900 (primary), Gray-600 (secondary)
+- Accent: Purple-600 (primary actions), Purple-700 (hover)
+- Success: Green-600, Warning: Amber-600, Error: Red-600
+- Borders: Gray-200
 
-**Font Family**: Roboto (via Google Fonts CDN)
-- **Display/Headers**: Roboto Medium (500)
-  - Team names: text-2xl to text-3xl
-  - Section headers: text-xl
-  - Card titles: text-lg
-- **Body Text**: Roboto Regular (400)
-  - Primary content: text-base
-  - Secondary/metadata: text-sm
-  - Captions: text-xs
-- **Interactive Elements**: Roboto Medium (500) for buttons and tabs
+**Dark Mode**:
+- Background: Gray-900 (surface), Gray-800 (elevated cards)
+- Text: Gray-50 (primary), Gray-400 (secondary)
+- Accent: Purple-500 (primary actions), Purple-400 (hover)
+- Success: Green-500, Warning: Amber-500, Error: Red-500
+- Borders: Gray-700
 
-## Layout & Spacing System
+**Application**: Accent purple for CTAs, active states, dice roll highlights, session markers, and DM-exclusive features. Use semantic colors for availability status (green/amber/red) and validation states.
 
-**Tailwind Spacing Units**: 2, 4, 6, 8, 12, 16
+## Typography
+**Roboto** (Google Fonts): Medium (500) for headers/buttons, Regular (400) for body
+- Team names: text-2xl to text-3xl
+- Section headers: text-xl
+- Card titles: text-lg
+- Body: text-base
+- Metadata: text-sm
+- Captions: text-xs
+
+## Layout & Spacing
+**Tailwind Units**: 2, 4, 6, 8, 12, 16
 - Component padding: p-4 to p-6
-- Card spacing: gap-4 to gap-6
+- Card spacing: gap-4 to gap-6  
 - Section margins: mb-8 to mb-12
-- Tight groupings: gap-2
-- Container max-width: max-w-7xl for dashboards, max-w-2xl for wizards/forms
-
-**Grid Patterns**:
-- Dashboard modules: grid-cols-1 md:grid-cols-2 lg:grid-cols-3
-- Note cards: grid-cols-1 md:grid-cols-2
-- Wizard steps: Single column max-w-lg centered
+- Container max-widths: max-w-7xl (dashboards), max-w-2xl (forms)
 
 ## Core Components
 
-### Navigation
-- **Top App Bar**: Fixed header with team switcher dropdown (if multiple teams), settings icon
-- **Bottom Navigation** (mobile): Dashboard, Schedule, Notes, Dice (conditional), More
-- **Sidebar** (desktop): Persistent left rail with same navigation, team context always visible
-
 ### Setup Wizard
-- **Progress Indicator**: Stepper component (5 steps) at top
-- **Card Container**: Elevated surface (shadow-md) with max-w-lg centering
-- **Form Fields**: Material-style filled inputs with floating labels
-- **Action Buttons**: Primary CTA (Next/Create) prominent at bottom-right, Secondary (Back) at bottom-left
+5-step stepper at top with progress indicator. Centered cards (max-w-lg) with shadow-md elevation. Material-style filled inputs with floating labels. Steps include: Team Creation, Member Roles, Scheduling Setup, Feature Selection, Invite Generation. Primary CTA (Next/Create) bottom-right in accent purple, Secondary (Back) bottom-left.
+
+### Navigation
+**Desktop**: Persistent left sidebar with team context header (team name, type badge), navigation menu (Dashboard, Schedule, Notes, Dice, Settings), theme toggle at bottom.
+
+**Mobile**: Bottom navigation bar with 5 icons (Dashboard, Schedule, Notes, Dice, More). Top app bar shows team switcher dropdown and settings.
 
 ### Dashboard
-- **Module Cards**: Elevated cards (shadow-sm) with header, content area, and optional action footer
-  - Schedule Summary Card: Next 3 sessions, attendance indicators, quick availability toggle
-  - Notes Overview Card: Recent notes grid (4-6 items) with type badges
-  - Quick Actions Card: Create note, roll dice, manage team (DM only)
-- **Team Switcher**: Chip-style selector if multiple teams, displays current team name and type icon
+Hero section with team banner image (16:9, optional upload by DM) displaying team name overlay. Below: 3-column grid (lg:grid-cols-3, md:grid-cols-2) of module cards with shadow-sm elevation:
+
+**Schedule Summary Card**: Next 3 upcoming sessions with date/time, attendance indicators (circular avatars with availability color rings), quick toggle for personal availability.
+
+**Notes Overview Card**: 2x3 grid of recent note cards with type icon badges (Locations, Characters, NPCs, POIs, Quests), preview text, visibility indicator.
+
+**Quick Actions Card**: Large icon buttons for Create Note, Roll Dice, Manage Team (DM only), all using accent purple.
+
+**Team Activity Feed Card**: Recent actions, new notes, schedule changes with timestamps.
 
 ### Scheduling Interface
-- **Calendar View**: Month grid with session markers
-- **Session Details Panel**: Slide-in drawer showing attendees, availability status, override controls (DM)
-- **Availability Toggle**: Simple chip-based selector (Available/Busy/Maybe) per session
-- **Threshold Indicator**: Progress bar showing attendance vs minimum
+Month calendar grid view with session markers (purple dots for confirmed, outlined for tentative). Click session opens slide-in drawer (right side, 400px width) showing:
+- Session details header with edit button (DM only)
+- Attendee list with availability chips (Available/green, Busy/red, Maybe/amber)
+- Attendance threshold progress bar (purple fill)
+- DM override controls to mark session confirmed/cancelled
+
+Below calendar: upcoming sessions list view with quick availability toggles.
 
 ### Notes System
-- **Note Cards**: Compact card with type icon, title, preview text, visibility badge (private/shared)
-- **Note Type Filters**: Horizontal scrolling chip filters (Locations, Characters, NPCs, POIs, Quests)
-- **Detail View**: Full-screen with markdown editor, relationship links as chips
-- **Create FAB**: Floating action button (bottom-right) for quick note creation
+Grid view (md:grid-cols-2) of note cards containing type icon (top-left), title (text-lg), preview text (2 lines, text-sm), visibility badge (private/shared), edit/delete icons (top-right). Horizontal chip filters for note types above grid.
+
+Detail view: Full-screen with markdown editor, relationship links as purple chips, attached images in 2-column grid. Generated character/location images display prominently at top. Floating action button (bottom-right, purple) for quick note creation.
 
 ### Dice Roller
-- **Polyhedral Mode**: 
-  - Dice selector: Segmented button group (d4-d20-d100)
-  - Modifier input: Inline text field with +/- controls
-  - Roll button: Large, prominent with dice icon
-  - Results display: Card showing individual rolls, modifiers, total
-  - History: Collapsible list of recent rolls
-- **d10 Pool Mode**:
-  - Pool size: Number input with stepper
-  - Success counter: Prominent result display
-  - Visual dice representation on roll
+**Polyhedral Mode**: Segmented button group for dice selection (d4, d6, d8, d10, d12, d20, d100), modifier input with +/- steppers, large purple Roll button. Results card shows individual dice icons with values, modifier breakdown, total in large text (purple accent). Collapsible history below.
 
-### Invites Management
-- **Invite Card**: Contains link with one-tap copy button, code with one-tap copy button, expiration countdown
-- **Member List**: Avatar grid with role badges, remove option (DM only)
+**d10 Pool Mode**: Number input for pool size, success threshold selector, prominent success counter display. Visual representation of rolled dice in grid.
 
-### Media Tools
-- **Sound Broadcasting** (DM only):
-  - Library browser: Grid of sound cards with play preview
-  - Active broadcast indicator: Floating pill showing current sound, stop button
-- **Image Generation**:
-  - Prompt input: Multi-line text area
-  - Generate button: Below prompt
-  - Results gallery: Grid of generated images with save/attach options
+### Team Management
+Member grid showing avatars with role badges (DM/Player). Invite card with shareable link (one-tap copy button), 6-digit code (large display, one-tap copy), expiration countdown timer. Remove member option for DM with confirmation dialog.
+
+### Media Tools (DM Only)
+**Sound Broadcasting**: Grid of sound category cards with thumbnail images (ambient, combat, tavern, travel). Active broadcast shows floating pill indicator with waveform animation, stop button. Preview play button on each card.
+
+**Image Generation**: Multi-line prompt textarea, purple Generate button below. Results in 2-column grid with save/attach to note options.
 
 ## Images
+Team dashboard banner (16:9 hero), sound category thumbnails, generated character/location images in notes, optional team/player avatars. All hero images have subtle gradient overlays for text readability.
 
-**Team Dashboard**:
-- Optional team banner image at top (upload by DM, 16:9 aspect ratio, subtle overlay for text readability)
-
-**Note Detail Views**:
-- Attached images display in 2-column grid (md:grid-cols-2) within note content
-- Generated character/location images as focal point at top of detail view
-
-**Sound Library**:
-- Thumbnail images for sound categories (ambient, combat, tavern, etc.)
-
-## Interaction Patterns
-
-- **Dice Roll Animation**: Brief (300ms) 3D rotation on roll, settle to result
-- **Card Interactions**: Subtle elevation increase (shadow-md to shadow-lg) on hover
-- **Form Validation**: Inline error messages below fields, shake animation on submit failure
-- **Loading States**: Skeleton screens for data-heavy views, spinners for actions
-- **Toasts**: Bottom-center snackbar for confirmations (session created, note saved, invite copied)
+## Interactions
+Dice roll: 300ms 3D rotation animation settling to result. Card hover: shadow-sm to shadow-lg elevation change. Loading: skeleton screens for data views, spinners for actions. Toast notifications: bottom-center snackbar for confirmations. Theme transition: 200ms color fade between light/dark modes. All interactive elements have focus indicators and smooth state transitions.
 
 ## Accessibility
-- ARIA labels on all interactive elements
-- Keyboard navigation for all forms and lists
-- Focus indicators on interactive elements
-- Screen reader announcements for dice rolls and notifications
+ARIA labels on all controls, keyboard navigation throughout, focus indicators on interactive elements, screen reader announcements for dice rolls and notifications, sufficient color contrast in both themes (WCAG AA minimum), preference for system theme by default.
