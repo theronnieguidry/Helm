@@ -253,7 +253,7 @@ export async function registerTestRoutes(
     try {
       const userId = req.user.claims.sub;
       const { teamId } = req.params;
-      const { title, content, noteType, isPrivate } = req.body;
+      const { title, content, noteType, isPrivate, questStatus, contentBlocks, sessionDate, linkedNoteIds } = req.body;
 
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
@@ -267,6 +267,10 @@ export async function registerTestRoutes(
         content,
         noteType,
         isPrivate,
+        questStatus,
+        contentBlocks,
+        sessionDate: sessionDate ? new Date(sessionDate) : undefined,
+        linkedNoteIds,
       });
       res.json(note);
     } catch (error) {
@@ -509,6 +513,103 @@ export async function registerTestRoutes(
       res.json(updated);
     } catch (error) {
       res.status(500).json({ message: "Failed to update character" });
+    }
+  });
+
+  // Backlinks API (PRD-005)
+  app.get("/api/teams/:teamId/notes/:noteId/backlinks", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const note = await storage.getNote(noteId);
+      if (!note || note.teamId !== teamId) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      const backlinks = await storage.getBacklinks(noteId);
+      res.json(backlinks);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch backlinks" });
+    }
+  });
+
+  app.post("/api/teams/:teamId/notes/:noteId/backlinks", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+      const { sourceNoteId, sourceBlockId, textSnippet } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Verify target note exists and belongs to team
+      const targetNote = await storage.getNote(noteId);
+      if (!targetNote || targetNote.teamId !== teamId) {
+        return res.status(404).json({ message: "Target note not found" });
+      }
+
+      // Verify source note exists and belongs to team
+      const sourceNote = await storage.getNote(sourceNoteId);
+      if (!sourceNote || sourceNote.teamId !== teamId) {
+        return res.status(400).json({ message: "Source note not found" });
+      }
+
+      const backlink = await storage.createBacklink({
+        sourceNoteId,
+        sourceBlockId,
+        targetNoteId: noteId,
+        textSnippet,
+      });
+      res.json(backlink);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to create backlink" });
+    }
+  });
+
+  app.delete("/api/teams/:teamId/backlinks/:backlinkId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, backlinkId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      await storage.deleteBacklink(backlinkId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete backlink" });
+    }
+  });
+
+  app.get("/api/teams/:teamId/notes/:noteId/outgoing-links", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const note = await storage.getNote(noteId);
+      if (!note || note.teamId !== teamId) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      const outgoingLinks = await storage.getOutgoingLinks(noteId);
+      res.json(outgoingLinks);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch outgoing links" });
     }
   });
 }

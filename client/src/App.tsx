@@ -17,6 +17,7 @@ import LandingPage from "@/pages/landing";
 import TeamWizard from "@/pages/team-wizard";
 import DashboardContent from "@/pages/dashboard";
 import NotesPage from "@/pages/notes";
+import SessionReviewPage from "@/pages/session-review";
 import DicePage from "@/pages/dice";
 import SchedulePage from "@/pages/schedule";
 import MembersPage from "@/pages/members";
@@ -113,6 +114,9 @@ function AuthenticatedApp() {
               </Route>
               <Route path="/notes/:id">
                 <NotesPage team={currentTeam} />
+              </Route>
+              <Route path="/session-review/:noteId">
+                <SessionReviewPage team={currentTeam} />
               </Route>
               <Route path="/dice">
                 <DicePage team={currentTeam} />

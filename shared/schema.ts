@@ -129,8 +129,36 @@ export const invites = pgTable("invites", {
 });
 
 // Notes table
-export const NOTE_TYPES = ["location", "character", "npc", "poi", "quest"] as const;
+export const NOTE_TYPES = ["location", "character", "npc", "poi", "quest", "session_log"] as const;
 export type NoteType = typeof NOTE_TYPES[number];
+
+// Quest status enum (PRD-004)
+export const QUEST_STATUSES = ["lead", "todo", "active", "done", "abandoned"] as const;
+export type QuestStatus = typeof QUEST_STATUSES[number];
+
+export const QUEST_STATUS_LABELS: Record<QuestStatus, string> = {
+  lead: "Lead",
+  todo: "To Do",
+  active: "Active",
+  done: "Done",
+  abandoned: "Abandoned",
+};
+
+export const QUEST_STATUS_COLORS: Record<QuestStatus, string> = {
+  lead: "bg-gray-500/10 text-gray-500",
+  todo: "bg-blue-500/10 text-blue-500",
+  active: "bg-yellow-500/10 text-yellow-500",
+  done: "bg-green-500/10 text-green-500",
+  abandoned: "bg-red-500/10 text-red-500",
+};
+
+// Content block for session logs (PRD-001)
+export interface ContentBlock {
+  id: string;
+  content: string;
+  entityRefs?: string[];
+  createdAt: string;
+}
 
 export const notes = pgTable("notes", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -142,6 +170,11 @@ export const notes = pgTable("notes", {
   isPrivate: boolean("is_private").default(false),
   parentNoteId: varchar("parent_note_id"),
   linkedNoteIds: json("linked_note_ids").$type<string[]>().default([]),
+  // PRD-001: Session log fields
+  sessionDate: timestamp("session_date"),
+  contentBlocks: json("content_blocks").$type<ContentBlock[]>(),
+  // PRD-004: Quest status field
+  questStatus: text("quest_status").$type<QuestStatus>(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -182,6 +215,16 @@ export const diceRolls = pgTable("dice_rolls", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Backlinks table (PRD-005)
+export const backlinks = pgTable("backlinks", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sourceNoteId: varchar("source_note_id").notNull(),
+  sourceBlockId: varchar("source_block_id"),
+  targetNoteId: varchar("target_note_id").notNull(),
+  textSnippet: text("text_snippet"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Relations
 export const teamsRelations = relations(teams, ({ many }) => ({
   members: many(teamMembers),
@@ -217,6 +260,11 @@ export const diceRollsRelations = relations(diceRolls, ({ one }) => ({
   team: one(teams, { fields: [diceRolls.teamId], references: [teams.id] }),
 }));
 
+export const backlinksRelations = relations(backlinks, ({ one }) => ({
+  sourceNote: one(notes, { fields: [backlinks.sourceNoteId], references: [notes.id] }),
+  targetNote: one(notes, { fields: [backlinks.targetNoteId], references: [notes.id] }),
+}));
+
 // Insert schemas
 export const insertTeamSchema = createInsertSchema(teams).omit({ id: true, createdAt: true });
 export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({ id: true, joinedAt: true });
@@ -225,6 +273,7 @@ export const insertNoteSchema = createInsertSchema(notes).omit({ id: true, creat
 export const insertGameSessionSchema = createInsertSchema(gameSessions).omit({ id: true, createdAt: true });
 export const insertAvailabilitySchema = createInsertSchema(availability).omit({ id: true, createdAt: true });
 export const insertDiceRollSchema = createInsertSchema(diceRolls).omit({ id: true, createdAt: true });
+export const insertBacklinkSchema = createInsertSchema(backlinks).omit({ id: true, createdAt: true });
 
 // Types
 export type Team = typeof teams.$inferSelect;
@@ -241,3 +290,5 @@ export type Availability = typeof availability.$inferSelect;
 export type InsertAvailability = z.infer<typeof insertAvailabilitySchema>;
 export type DiceRoll = typeof diceRolls.$inferSelect;
 export type InsertDiceRoll = z.infer<typeof insertDiceRollSchema>;
+export type Backlink = typeof backlinks.$inferSelect;
+export type InsertBacklink = z.infer<typeof insertBacklinkSchema>;

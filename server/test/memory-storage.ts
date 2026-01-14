@@ -1,6 +1,6 @@
 import type { IStorage } from "../storage";
 import {
-  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS,
+  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS, QUEST_STATUSES,
   type Team, type InsertTeam,
   type TeamMember, type InsertTeamMember,
   type Invite, type InsertInvite,
@@ -8,12 +8,15 @@ import {
   type GameSession, type InsertGameSession,
   type Availability, type InsertAvailability,
   type DiceRoll, type InsertDiceRoll,
+  type Backlink, type InsertBacklink,
   type User,
   type TeamType,
   type DiceMode,
   type RecurrenceFrequency,
   type NoteType,
   type AvailabilityStatus,
+  type QuestStatus,
+  type ContentBlock,
 } from "@shared/schema";
 
 function generateId(): string {
@@ -56,6 +59,14 @@ function validateAvailabilityStatus(value: string): AvailabilityStatus {
   return value as AvailabilityStatus;
 }
 
+function validateQuestStatus(value: string | null | undefined): QuestStatus | null {
+  if (value === null || value === undefined) return null;
+  if (!QUEST_STATUSES.includes(value as QuestStatus)) {
+    throw new Error(`Invalid quest status: ${value}`);
+  }
+  return value as QuestStatus;
+}
+
 export class MemoryStorage implements IStorage {
   private users: Map<string, User> = new Map();
   private teams: Map<string, Team> = new Map();
@@ -65,6 +76,7 @@ export class MemoryStorage implements IStorage {
   private sessions: Map<string, GameSession> = new Map();
   private availabilityMap: Map<string, Availability> = new Map();
   private diceRolls: Map<string, DiceRoll> = new Map();
+  private backlinks: Map<string, Backlink> = new Map();
 
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
@@ -240,7 +252,11 @@ export class MemoryStorage implements IStorage {
   async createNote(note: InsertNote): Promise<Note> {
     const id = generateId();
     const noteType = validateNoteType(note.noteType ?? "location");
-    
+    // For quests, use provided status or default to 'lead'. For non-quests, always null.
+    const questStatus = noteType === "quest"
+      ? validateQuestStatus(note.questStatus) ?? "lead"
+      : null;
+
     const newNote: Note = {
       id,
       teamId: note.teamId,
@@ -251,6 +267,11 @@ export class MemoryStorage implements IStorage {
       isPrivate: note.isPrivate ?? false,
       parentNoteId: note.parentNoteId ?? null,
       linkedNoteIds: (note.linkedNoteIds as string[]) ?? [],
+      // PRD-001: Session log fields
+      sessionDate: note.sessionDate ? new Date(note.sessionDate) : null,
+      contentBlocks: (note.contentBlocks as ContentBlock[]) ?? null,
+      // PRD-004: Quest status
+      questStatus,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -267,7 +288,23 @@ export class MemoryStorage implements IStorage {
   }
 
   async deleteNote(id: string): Promise<void> {
+    // Also delete any backlinks referencing this note
+    for (const [backlinkId, backlink] of Array.from(this.backlinks.entries())) {
+      if (backlink.sourceNoteId === id || backlink.targetNoteId === id) {
+        this.backlinks.delete(backlinkId);
+      }
+    }
     this.notes.delete(id);
+  }
+
+  async getSessionLogs(teamId: string): Promise<Note[]> {
+    return Array.from(this.notes.values())
+      .filter(n => n.teamId === teamId && n.noteType === "session_log")
+      .sort((a, b) => {
+        const dateA = a.sessionDate?.getTime() ?? 0;
+        const dateB = b.sessionDate?.getTime() ?? 0;
+        return dateB - dateA;
+      });
   }
 
   async getSessions(teamId: string): Promise<GameSession[]> {
@@ -360,6 +397,53 @@ export class MemoryStorage implements IStorage {
     return newRoll;
   }
 
+  // Backlinks (PRD-005)
+  async getBacklinks(targetNoteId: string): Promise<Backlink[]> {
+    return Array.from(this.backlinks.values())
+      .filter(b => b.targetNoteId === targetNoteId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async getOutgoingLinks(sourceNoteId: string): Promise<Backlink[]> {
+    return Array.from(this.backlinks.values())
+      .filter(b => b.sourceNoteId === sourceNoteId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async createBacklink(backlink: InsertBacklink): Promise<Backlink> {
+    const id = generateId();
+    const newBacklink: Backlink = {
+      id,
+      sourceNoteId: backlink.sourceNoteId,
+      sourceBlockId: backlink.sourceBlockId ?? null,
+      targetNoteId: backlink.targetNoteId,
+      textSnippet: backlink.textSnippet ?? null,
+      createdAt: new Date(),
+    };
+    this.backlinks.set(id, newBacklink);
+    return newBacklink;
+  }
+
+  async deleteBacklink(id: string): Promise<void> {
+    this.backlinks.delete(id);
+  }
+
+  async deleteBacklinksBySource(sourceNoteId: string): Promise<void> {
+    for (const [id, backlink] of Array.from(this.backlinks.entries())) {
+      if (backlink.sourceNoteId === sourceNoteId) {
+        this.backlinks.delete(id);
+      }
+    }
+  }
+
+  async deleteBacklinksByTarget(targetNoteId: string): Promise<void> {
+    for (const [id, backlink] of Array.from(this.backlinks.entries())) {
+      if (backlink.targetNoteId === targetNoteId) {
+        this.backlinks.delete(id);
+      }
+    }
+  }
+
   clear(): void {
     this.users.clear();
     this.teams.clear();
@@ -369,5 +453,6 @@ export class MemoryStorage implements IStorage {
     this.sessions.clear();
     this.availabilityMap.clear();
     this.diceRolls.clear();
+    this.backlinks.clear();
   }
 }

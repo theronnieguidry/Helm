@@ -34,6 +34,7 @@ const NOTE_TYPE_ICONS: Record<NoteType, typeof MapPin> = {
   npc: Users,
   poi: MapPin,
   quest: ScrollText,
+  session_log: BookOpen,
 };
 
 const NOTE_TYPE_COLORS: Record<NoteType, string> = {
@@ -42,6 +43,7 @@ const NOTE_TYPE_COLORS: Record<NoteType, string> = {
   npc: "bg-orange-500/10 text-orange-500",
   poi: "bg-purple-500/10 text-purple-500",
   quest: "bg-red-500/10 text-red-500",
+  session_log: "bg-amber-500/10 text-amber-500",
 };
 
 export default function DashboardContent({ team }: DashboardContentProps) {

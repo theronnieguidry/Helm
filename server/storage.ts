@@ -1,4 +1,4 @@
-import { 
+import {
   teams, Team, InsertTeam,
   teamMembers, TeamMember, InsertTeamMember,
   invites, Invite, InsertInvite,
@@ -6,6 +6,7 @@ import {
   gameSessions, GameSession, InsertGameSession,
   availability, Availability, InsertAvailability,
   diceRolls, DiceRoll, InsertDiceRoll,
+  backlinks, Backlink, InsertBacklink,
   users
 } from "@shared/schema";
 import { db } from "./db";
@@ -44,6 +45,7 @@ export interface IStorage {
   createNote(note: InsertNote): Promise<Note>;
   updateNote(id: string, data: Partial<InsertNote>): Promise<Note>;
   deleteNote(id: string): Promise<void>;
+  getSessionLogs(teamId: string): Promise<Note[]>;
 
   // Game Sessions
   getSessions(teamId: string): Promise<GameSession[]>;
@@ -59,6 +61,14 @@ export interface IStorage {
   // Dice Rolls
   getDiceRolls(teamId: string): Promise<DiceRoll[]>;
   createDiceRoll(roll: InsertDiceRoll): Promise<DiceRoll>;
+
+  // Backlinks (PRD-005)
+  getBacklinks(targetNoteId: string): Promise<Backlink[]>;
+  getOutgoingLinks(sourceNoteId: string): Promise<Backlink[]>;
+  createBacklink(backlink: InsertBacklink): Promise<Backlink>;
+  deleteBacklink(id: string): Promise<void>;
+  deleteBacklinksBySource(sourceNoteId: string): Promise<void>;
+  deleteBacklinksByTarget(targetNoteId: string): Promise<void>;
 }
 
 function generateInviteCode(): string {
@@ -232,7 +242,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteNote(id: string): Promise<void> {
+    // Also delete any backlinks referencing this note
+    await db.delete(backlinks).where(eq(backlinks.sourceNoteId, id));
+    await db.delete(backlinks).where(eq(backlinks.targetNoteId, id));
     await db.delete(notes).where(eq(notes.id, id));
+  }
+
+  async getSessionLogs(teamId: string): Promise<Note[]> {
+    return await db
+      .select()
+      .from(notes)
+      .where(and(eq(notes.teamId, teamId), eq(notes.noteType, "session_log")))
+      .orderBy(desc(notes.sessionDate));
   }
 
   // Game Sessions
@@ -308,6 +329,40 @@ export class DatabaseStorage implements IStorage {
   async createDiceRoll(roll: InsertDiceRoll): Promise<DiceRoll> {
     const [created] = await db.insert(diceRolls).values(roll).returning();
     return created;
+  }
+
+  // Backlinks (PRD-005)
+  async getBacklinks(targetNoteId: string): Promise<Backlink[]> {
+    return await db
+      .select()
+      .from(backlinks)
+      .where(eq(backlinks.targetNoteId, targetNoteId))
+      .orderBy(desc(backlinks.createdAt));
+  }
+
+  async getOutgoingLinks(sourceNoteId: string): Promise<Backlink[]> {
+    return await db
+      .select()
+      .from(backlinks)
+      .where(eq(backlinks.sourceNoteId, sourceNoteId))
+      .orderBy(desc(backlinks.createdAt));
+  }
+
+  async createBacklink(backlink: InsertBacklink): Promise<Backlink> {
+    const [created] = await db.insert(backlinks).values(backlink).returning();
+    return created;
+  }
+
+  async deleteBacklink(id: string): Promise<void> {
+    await db.delete(backlinks).where(eq(backlinks.id, id));
+  }
+
+  async deleteBacklinksBySource(sourceNoteId: string): Promise<void> {
+    await db.delete(backlinks).where(eq(backlinks.sourceNoteId, sourceNoteId));
+  }
+
+  async deleteBacklinksByTarget(targetNoteId: string): Promise<void> {
+    await db.delete(backlinks).where(eq(backlinks.targetNoteId, targetNoteId));
   }
 }
 
