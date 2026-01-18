@@ -35,12 +35,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-import {
   Plus,
   Search,
   MapPin,
@@ -49,9 +43,7 @@ import {
   ScrollText,
   Lock,
   Globe,
-  Pencil,
   Trash2,
-  X,
   BookOpen,
   Calendar,
 } from "lucide-react";
@@ -60,7 +52,17 @@ import { useAuth } from "@/hooks/use-auth";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Note, NoteType, Team, QuestStatus } from "@shared/schema";
 import { NOTE_TYPES, QUEST_STATUSES, QUEST_STATUS_LABELS, QUEST_STATUS_COLORS } from "@shared/schema";
-import { formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow, format } from "date-fns";
+
+// Helper to format date as YYYY-MM-DD
+function formatDateForTitle(date: Date): string {
+  return format(date, "yyyy-MM-dd");
+}
+
+// Helper to format date for input[type="date"]
+function formatDateForInput(date: Date): string {
+  return format(date, "yyyy-MM-dd");
+}
 
 interface NotesPageProps {
   team: Team;
@@ -90,11 +92,8 @@ const NOTE_TYPE_LABELS: Record<NoteType, string> = {
   npc: "NPC",
   poi: "Point of Interest",
   quest: "Quest",
-  session_log: "Session Log",
+  session_log: "Session",
 };
-
-// Filter out session_log from regular note types
-const REGULAR_NOTE_TYPES = NOTE_TYPES.filter((t) => t !== "session_log");
 
 export default function NotesPage({ team }: NotesPageProps) {
   const [, navigate] = useLocation();
@@ -104,19 +103,22 @@ export default function NotesPage({ team }: NotesPageProps) {
   
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedType, setSelectedType] = useState<NoteType | "all">("all");
-  const [activeTab, setActiveTab] = useState<"notes" | "sessions">("notes");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | null>(null);
 
-  const [formData, setFormData] = useState({
-    title: "",
+  // Default form data for creating new sessions
+  const getDefaultFormData = () => ({
+    title: formatDateForTitle(new Date()),
     content: "",
-    noteType: "location" as NoteType,
+    noteType: "session_log" as NoteType,
     isPrivate: false,
     questStatus: "lead" as QuestStatus,
+    sessionDate: formatDateForInput(new Date()),
   });
+
+  const [formData, setFormData] = useState(getDefaultFormData());
 
   useEffect(() => {
     const params = new URLSearchParams(searchString);
@@ -133,7 +135,12 @@ export default function NotesPage({ team }: NotesPageProps) {
 
   const createNoteMutation = useMutation({
     mutationFn: async (data: typeof formData) => {
-      const response = await apiRequest("POST", `/api/teams/${team.id}/notes`, data);
+      // Convert sessionDate string to Date for API
+      const apiData = {
+        ...data,
+        sessionDate: data.sessionDate ? new Date(data.sessionDate).toISOString() : undefined,
+      };
+      const response = await apiRequest("POST", `/api/teams/${team.id}/notes`, apiData);
       return response.json();
     },
     onSuccess: () => {
@@ -149,7 +156,12 @@ export default function NotesPage({ team }: NotesPageProps) {
 
   const updateNoteMutation = useMutation({
     mutationFn: async ({ id, data }: { id: string; data: typeof formData }) => {
-      const response = await apiRequest("PATCH", `/api/teams/${team.id}/notes/${id}`, data);
+      // Convert sessionDate string to Date for API
+      const apiData = {
+        ...data,
+        sessionDate: data.sessionDate ? new Date(data.sessionDate).toISOString() : undefined,
+      };
+      const response = await apiRequest("PATCH", `/api/teams/${team.id}/notes/${id}`, apiData);
       return response.json();
     },
     onSuccess: () => {
@@ -179,7 +191,7 @@ export default function NotesPage({ team }: NotesPageProps) {
   });
 
   const resetForm = () => {
-    setFormData({ title: "", content: "", noteType: "location", isPrivate: false, questStatus: "lead" });
+    setFormData(getDefaultFormData());
   };
 
   const openEditNote = (note: Note) => {
@@ -189,6 +201,9 @@ export default function NotesPage({ team }: NotesPageProps) {
       noteType: note.noteType as NoteType,
       isPrivate: note.isPrivate || false,
       questStatus: (note.questStatus as QuestStatus) || "lead",
+      sessionDate: note.sessionDate
+        ? formatDateForInput(new Date(note.sessionDate))
+        : formatDateForInput(new Date(note.createdAt!)),
     });
     setSelectedNote(note);
   };
@@ -201,102 +216,80 @@ export default function NotesPage({ team }: NotesPageProps) {
     }
   };
 
-  const filteredNotes = notes?.filter((note) => {
-    const matchesSearch =
-      note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      note.content?.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesType = selectedType === "all" || note.noteType === selectedType;
-    const isVisible = !note.isPrivate || note.authorId === user?.id;
-    // Filter by tab: notes tab shows non-session notes, sessions tab shows session_log
-    const matchesTab =
-      activeTab === "sessions"
-        ? note.noteType === "session_log"
-        : note.noteType !== "session_log";
-    return matchesSearch && matchesType && isVisible && matchesTab;
-  });
+  // Filter and sort notes - all notes shown together, sorted by session date (descending)
+  const filteredNotes = notes
+    ?.filter((note) => {
+      const matchesSearch =
+        note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        note.content?.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesType = selectedType === "all" || note.noteType === selectedType;
+      const isVisible = !note.isPrivate || note.authorId === user?.id;
+      return matchesSearch && matchesType && isVisible;
+    })
+    .sort((a, b) => {
+      // Sort by sessionDate (for session logs) or createdAt (for other types), descending
+      const dateA = a.sessionDate ? new Date(a.sessionDate) : new Date(a.createdAt!);
+      const dateB = b.sessionDate ? new Date(b.sessionDate) : new Date(b.createdAt!);
+      return dateB.getTime() - dateA.getTime();
+    });
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-2xl md:text-3xl font-medium">Notes</h1>
+          <h1 className="text-2xl md:text-3xl font-medium">Sessions</h1>
           <p className="text-muted-foreground">
-            Keep track of your campaign details
+            Record and review your session notes
           </p>
         </div>
         <Button
           onClick={() => {
-            setFormData((prev) => ({
-              ...prev,
-              noteType: activeTab === "sessions" ? "session_log" : "location",
-            }));
+            resetForm(); // Reset to defaults (today's date, session_log type)
             setIsCreateOpen(true);
           }}
           data-testid="button-create-note"
         >
           <Plus className="h-4 w-4 mr-2" />
-          {activeTab === "sessions" ? "New Session Log" : "New Note"}
+          New Session
         </Button>
       </div>
-
-      <Tabs
-        value={activeTab}
-        onValueChange={(value) => {
-          setActiveTab(value as "notes" | "sessions");
-          setSelectedType("all");
-        }}
-        className="mb-6"
-      >
-        <TabsList>
-          <TabsTrigger value="notes" data-testid="tab-notes">
-            <ScrollText className="h-4 w-4 mr-2" />
-            Notes
-          </TabsTrigger>
-          <TabsTrigger value="sessions" data-testid="tab-sessions">
-            <BookOpen className="h-4 w-4 mr-2" />
-            Session Logs
-          </TabsTrigger>
-        </TabsList>
-      </Tabs>
 
       <div className="flex flex-col sm:flex-row gap-4 mb-6">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder={activeTab === "sessions" ? "Search session logs..." : "Search notes..."}
+            placeholder="Search sessions..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-10"
             data-testid="input-search-notes"
           />
         </div>
-        {activeTab === "notes" && (
-          <div className="flex gap-2 overflow-x-auto pb-2 sm:pb-0">
-            <Button
-              variant={selectedType === "all" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setSelectedType("all")}
-              data-testid="filter-all"
-            >
-              All
-            </Button>
-            {REGULAR_NOTE_TYPES.map((type) => {
-              const Icon = NOTE_TYPE_ICONS[type];
-              return (
-                <Button
-                  key={type}
-                  variant={selectedType === type ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSelectedType(type)}
-                  data-testid={`filter-${type}`}
-                >
-                  <Icon className="h-4 w-4 mr-1" />
-                  {NOTE_TYPE_LABELS[type]}
-                </Button>
-              );
-            })}
-          </div>
-        )}
+        <div className="flex gap-2 overflow-x-auto pb-2 sm:pb-0">
+          <Button
+            variant={selectedType === "all" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setSelectedType("all")}
+            data-testid="filter-all"
+          >
+            All
+          </Button>
+          {NOTE_TYPES.map((type) => {
+            const Icon = NOTE_TYPE_ICONS[type];
+            return (
+              <Button
+                key={type}
+                variant={selectedType === type ? "default" : "outline"}
+                size="sm"
+                onClick={() => setSelectedType(type)}
+                data-testid={`filter-${type}`}
+              >
+                <Icon className="h-4 w-4 mr-1" />
+                {NOTE_TYPE_LABELS[type]}
+              </Button>
+            );
+          })}
+        </div>
       </div>
 
       {isLoading ? (
@@ -352,6 +345,12 @@ export default function NotesPage({ team }: NotesPageProps) {
                     </p>
                   )}
                   <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant="outline" className="text-xs">
+                      <Calendar className="h-3 w-3 mr-1" />
+                      {note.sessionDate
+                        ? new Date(note.sessionDate).toLocaleDateString()
+                        : new Date(note.createdAt!).toLocaleDateString()}
+                    </Badge>
                     <Badge variant="secondary" className="text-xs capitalize">
                       {NOTE_TYPE_LABELS[note.noteType as NoteType]}
                     </Badge>
@@ -360,12 +359,6 @@ export default function NotesPage({ team }: NotesPageProps) {
                         className={`text-xs ${QUEST_STATUS_COLORS[note.questStatus as QuestStatus]}`}
                       >
                         {QUEST_STATUS_LABELS[note.questStatus as QuestStatus]}
-                      </Badge>
-                    )}
-                    {note.noteType === "session_log" && note.sessionDate && (
-                      <Badge variant="outline" className="text-xs">
-                        <Calendar className="h-3 w-3 mr-1" />
-                        {new Date(note.sessionDate).toLocaleDateString()}
                       </Badge>
                     )}
                     <span className="text-xs text-muted-foreground">
@@ -380,34 +373,23 @@ export default function NotesPage({ team }: NotesPageProps) {
       ) : (
         <Card>
           <CardContent className="py-12 text-center">
-            {activeTab === "sessions" ? (
-              <BookOpen className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-            ) : (
-              <ScrollText className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-            )}
-            <h3 className="font-medium mb-1">
-              {activeTab === "sessions" ? "No session logs found" : "No notes found"}
-            </h3>
+            <BookOpen className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
+            <h3 className="font-medium mb-1">No sessions found</h3>
             <p className="text-sm text-muted-foreground mb-4">
               {searchQuery || selectedType !== "all"
                 ? "Try adjusting your filters"
-                : activeTab === "sessions"
-                  ? "Create your first session log to get started"
-                  : "Create your first note to get started"}
+                : "Create your first session to get started"}
             </p>
             {!searchQuery && selectedType === "all" && (
               <Button
                 onClick={() => {
-                  setFormData((prev) => ({
-                    ...prev,
-                    noteType: activeTab === "sessions" ? "session_log" : "location",
-                  }));
+                  resetForm();
                   setIsCreateOpen(true);
                 }}
                 data-testid="button-create-first-note"
               >
                 <Plus className="h-4 w-4 mr-2" />
-                {activeTab === "sessions" ? "Create Session Log" : "Create Note"}
+                Create Session
               </Button>
             )}
           </CardContent>
@@ -424,34 +406,26 @@ export default function NotesPage({ team }: NotesPageProps) {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
-              {selectedNote
-                ? formData.noteType === "session_log"
-                  ? "Edit Session Log"
-                  : "Edit Note"
-                : activeTab === "sessions"
-                  ? "Create Session Log"
-                  : "Create Note"}
+              {selectedNote ? "Edit Session" : "Create Session"}
             </DialogTitle>
             <DialogDescription>
               {selectedNote
-                ? "Update your note details"
-                : activeTab === "sessions"
-                  ? "Add a new session log to your campaign"
-                  : "Add a new note to your campaign"}
+                ? "Update your session details"
+                : "Record notes from your session"}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="title">Title</Label>
-              <Input
-                id="title"
-                placeholder={activeTab === "sessions" ? "Session 1: The Beginning" : "Note title"}
-                value={formData.title}
-                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                data-testid="input-note-title"
-              />
-            </div>
-            {activeTab !== "sessions" && formData.noteType !== "session_log" && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="sessionDate">Session Date</Label>
+                <Input
+                  id="sessionDate"
+                  type="date"
+                  value={formData.sessionDate}
+                  onChange={(e) => setFormData({ ...formData, sessionDate: e.target.value })}
+                  data-testid="input-session-date"
+                />
+              </div>
               <div className="space-y-2">
                 <Label htmlFor="noteType">Type</Label>
                 <Select
@@ -462,7 +436,7 @@ export default function NotesPage({ team }: NotesPageProps) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {REGULAR_NOTE_TYPES.map((type) => {
+                    {NOTE_TYPES.map((type) => {
                       const Icon = NOTE_TYPE_ICONS[type];
                       return (
                         <SelectItem key={type} value={type}>
@@ -476,7 +450,20 @@ export default function NotesPage({ team }: NotesPageProps) {
                   </SelectContent>
                 </Select>
               </div>
-            )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="title">Title</Label>
+              <Input
+                id="title"
+                placeholder="2024-01-15 — The Dragon's Lair"
+                value={formData.title}
+                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                data-testid="input-note-title"
+              />
+              <p className="text-xs text-muted-foreground">
+                Tip: Add a suffix like " — Session 14" or " — The Heist"
+              </p>
+            </div>
             {formData.noteType === "quest" && (
               <div className="space-y-2">
                 <Label htmlFor="questStatus">Quest Status</Label>

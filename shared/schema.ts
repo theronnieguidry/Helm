@@ -88,6 +88,10 @@ export const TEAM_TYPE_DICE_MODE: Record<TeamType, DiceMode> = {
 export const RECURRENCE_FREQUENCIES = ["weekly", "biweekly", "monthly"] as const;
 export type RecurrenceFrequency = typeof RECURRENCE_FREQUENCIES[number];
 
+// Session status (PRD-010)
+export const SESSION_STATUSES = ["scheduled", "canceled"] as const;
+export type SessionStatus = typeof SESSION_STATUSES[number];
+
 // Teams table
 export const teams = pgTable("teams", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -102,6 +106,7 @@ export const teams = pgTable("teams", {
   timezone: text("timezone"),
   recurrenceAnchorDate: timestamp("recurrence_anchor_date"),
   minAttendanceThreshold: integer("min_attendance_threshold").default(2),
+  defaultSessionDurationMinutes: integer("default_session_duration_minutes").default(180), // PRD-010A: 3 hours default
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -186,6 +191,7 @@ export const gameSessions = pgTable("game_sessions", {
   scheduledAt: timestamp("scheduled_at").notNull(),
   isOverride: boolean("is_override").default(false),
   notes: text("notes"),
+  status: text("status").notNull().$type<SessionStatus>().default("scheduled"), // PRD-010
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -215,6 +221,18 @@ export const diceRolls = pgTable("dice_rolls", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// User Availability (PRD-009) - date-based personal availability
+export const userAvailability = pgTable("user_availability", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teamId: varchar("team_id").notNull(),
+  userId: varchar("user_id").notNull(),
+  date: timestamp("date").notNull(),
+  startTime: text("start_time").notNull(), // HH:MM format
+  endTime: text("end_time").notNull(),     // HH:MM format
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 // Backlinks table (PRD-005)
 export const backlinks = pgTable("backlinks", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -223,6 +241,18 @@ export const backlinks = pgTable("backlinks", {
   targetNoteId: varchar("target_note_id").notNull(),
   textSnippet: text("text_snippet"),
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Session Overrides table (PRD-010A) - DM overrides for auto-generated session candidates
+export const sessionOverrides = pgTable("session_overrides", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teamId: varchar("team_id").notNull(),
+  occurrenceKey: varchar("occurrence_key").notNull(), // e.g., "2026-01-24" - stable identity for computed occurrence
+  status: text("status").notNull().$type<SessionStatus>().default("scheduled"),
+  scheduledAtOverride: timestamp("scheduled_at_override"), // null = use computed time from recurrence
+  updatedBy: varchar("updated_by").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 // Relations
@@ -260,9 +290,17 @@ export const diceRollsRelations = relations(diceRolls, ({ one }) => ({
   team: one(teams, { fields: [diceRolls.teamId], references: [teams.id] }),
 }));
 
+export const userAvailabilityRelations = relations(userAvailability, ({ one }) => ({
+  team: one(teams, { fields: [userAvailability.teamId], references: [teams.id] }),
+}));
+
 export const backlinksRelations = relations(backlinks, ({ one }) => ({
   sourceNote: one(notes, { fields: [backlinks.sourceNoteId], references: [notes.id] }),
   targetNote: one(notes, { fields: [backlinks.targetNoteId], references: [notes.id] }),
+}));
+
+export const sessionOverridesRelations = relations(sessionOverrides, ({ one }) => ({
+  team: one(teams, { fields: [sessionOverrides.teamId], references: [teams.id] }),
 }));
 
 // Insert schemas
@@ -274,6 +312,8 @@ export const insertGameSessionSchema = createInsertSchema(gameSessions).omit({ i
 export const insertAvailabilitySchema = createInsertSchema(availability).omit({ id: true, createdAt: true });
 export const insertDiceRollSchema = createInsertSchema(diceRolls).omit({ id: true, createdAt: true });
 export const insertBacklinkSchema = createInsertSchema(backlinks).omit({ id: true, createdAt: true });
+export const insertUserAvailabilitySchema = createInsertSchema(userAvailability).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertSessionOverrideSchema = createInsertSchema(sessionOverrides).omit({ id: true, createdAt: true, updatedAt: true });
 
 // Types
 export type Team = typeof teams.$inferSelect;
@@ -292,3 +332,7 @@ export type DiceRoll = typeof diceRolls.$inferSelect;
 export type InsertDiceRoll = z.infer<typeof insertDiceRollSchema>;
 export type Backlink = typeof backlinks.$inferSelect;
 export type InsertBacklink = z.infer<typeof insertBacklinkSchema>;
+export type UserAvailability = typeof userAvailability.$inferSelect;
+export type InsertUserAvailability = z.infer<typeof insertUserAvailabilitySchema>;
+export type SessionOverride = typeof sessionOverrides.$inferSelect;
+export type InsertSessionOverride = z.infer<typeof insertSessionOverrideSchema>;

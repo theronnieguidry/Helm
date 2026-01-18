@@ -2,7 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated, registerAuthRoutes } from "./replit_integrations/auth";
-import { TEAM_TYPE_DICE_MODE, type TeamType, type AvailabilityStatus } from "@shared/schema";
+import { TEAM_TYPE_DICE_MODE, SESSION_STATUSES, type TeamType, type AvailabilityStatus, type SessionStatus } from "@shared/schema";
+import { generateSessionCandidates } from "@shared/recurrence";
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -412,6 +413,35 @@ export async function registerRoutes(
     }
   });
 
+  // Update session status (PRD-010)
+  app.patch("/api/teams/:teamId/sessions/:sessionId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, sessionId } = req.params;
+      const { status } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member || member.role !== "dm") {
+        return res.status(403).json({ message: "Not authorized - DM only" });
+      }
+
+      const session = await storage.getSession(sessionId);
+      if (!session || session.teamId !== teamId) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+
+      if (!["scheduled", "canceled"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
+      }
+
+      const updated = await storage.updateSession(sessionId, { status });
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating session:", error);
+      res.status(500).json({ message: "Failed to update session" });
+    }
+  });
+
   // Get availability
   app.get("/api/teams/:teamId/availability", isAuthenticated, async (req: any, res) => {
     try {
@@ -539,7 +569,7 @@ export async function registerRoutes(
     try {
       const userId = req.user.claims.sub;
       const user = await storage.getUser(userId);
-      
+
       if (!user) {
         return res.status(404).json({ message: "User not found" });
       }
@@ -548,6 +578,235 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error fetching user profile:", error);
       res.status(500).json({ message: "Failed to fetch user profile" });
+    }
+  });
+
+  // User Availability (PRD-009) - date-based personal availability
+  app.get("/api/teams/:teamId/user-availability", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { startDate, endDate } = req.query;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ message: "startDate and endDate query parameters are required" });
+      }
+
+      const availability = await storage.getUserAvailability(
+        teamId,
+        new Date(startDate as string),
+        new Date(endDate as string)
+      );
+      res.json(availability);
+    } catch (error) {
+      console.error("Error fetching user availability:", error);
+      res.status(500).json({ message: "Failed to fetch user availability" });
+    }
+  });
+
+  app.post("/api/teams/:teamId/user-availability", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { date, startTime, endTime } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Validate time format (HH:MM)
+      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
+      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+        return res.status(400).json({ message: "Invalid time format. Use HH:MM" });
+      }
+
+      // Check for existing availability on this date
+      const existingAvailability = await storage.getUserAvailabilityByDate(teamId, userId, new Date(date));
+      if (existingAvailability) {
+        return res.status(409).json({ message: "Availability already exists for this date. Use PATCH to update." });
+      }
+
+      const availability = await storage.createUserAvailability({
+        teamId,
+        userId,
+        date: new Date(date),
+        startTime,
+        endTime,
+      });
+
+      res.json(availability);
+    } catch (error) {
+      console.error("Error creating user availability:", error);
+      res.status(500).json({ message: "Failed to create user availability" });
+    }
+  });
+
+  app.patch("/api/teams/:teamId/user-availability/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, id } = req.params;
+      const { startTime, endTime } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Validate time format if provided
+      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
+      if (startTime && !timeRegex.test(startTime)) {
+        return res.status(400).json({ message: "Invalid startTime format. Use HH:MM" });
+      }
+      if (endTime && !timeRegex.test(endTime)) {
+        return res.status(400).json({ message: "Invalid endTime format. Use HH:MM" });
+      }
+
+      const updateData: { startTime?: string; endTime?: string } = {};
+      if (startTime) updateData.startTime = startTime;
+      if (endTime) updateData.endTime = endTime;
+
+      const availability = await storage.updateUserAvailability(id, updateData);
+      res.json(availability);
+    } catch (error) {
+      console.error("Error updating user availability:", error);
+      res.status(500).json({ message: "Failed to update user availability" });
+    }
+  });
+
+  app.delete("/api/teams/:teamId/user-availability/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, id } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      await storage.deleteUserAvailability(id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting user availability:", error);
+      res.status(500).json({ message: "Failed to delete user availability" });
+    }
+  });
+
+  // Session Candidates (PRD-010A) - auto-generated sessions from recurrence
+  app.get("/api/teams/:teamId/session-candidates", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { startDate, endDate } = req.query;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ message: "startDate and endDate query parameters are required" });
+      }
+
+      const team = await storage.getTeam(teamId);
+      if (!team) {
+        return res.status(404).json({ message: "Team not found" });
+      }
+
+      // Get any overrides for this team
+      const overrides = await storage.getSessionOverrides(teamId);
+
+      // Generate candidates from recurrence settings
+      const candidates = generateSessionCandidates(
+        team,
+        new Date(startDate as string),
+        new Date(endDate as string),
+        overrides
+      );
+
+      res.json({ candidates, overrides });
+    } catch (error) {
+      console.error("Error fetching session candidates:", error);
+      res.status(500).json({ message: "Failed to fetch session candidates" });
+    }
+  });
+
+  // Session Overrides (PRD-010A) - DM overrides for auto-generated sessions
+  app.post("/api/teams/:teamId/session-overrides", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { occurrenceKey, status, scheduledAtOverride } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member || member.role !== "dm") {
+        return res.status(403).json({ message: "Not authorized - DM only" });
+      }
+
+      if (!occurrenceKey) {
+        return res.status(400).json({ message: "occurrenceKey is required" });
+      }
+
+      // Validate status if provided
+      if (status && !SESSION_STATUSES.includes(status as SessionStatus)) {
+        return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
+      }
+
+      const override = await storage.upsertSessionOverride({
+        teamId,
+        occurrenceKey,
+        status: status || "scheduled",
+        scheduledAtOverride: scheduledAtOverride ? new Date(scheduledAtOverride) : null,
+        updatedBy: userId,
+      });
+
+      res.json(override);
+    } catch (error) {
+      console.error("Error creating session override:", error);
+      res.status(500).json({ message: "Failed to create session override" });
+    }
+  });
+
+  // Get session overrides for a team (PRD-010A)
+  app.get("/api/teams/:teamId/session-overrides", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const overrides = await storage.getSessionOverrides(teamId);
+      res.json(overrides);
+    } catch (error) {
+      console.error("Error fetching session overrides:", error);
+      res.status(500).json({ message: "Failed to fetch session overrides" });
+    }
+  });
+
+  // Delete session override (PRD-010A) - reinstates the session to default behavior
+  app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, id } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member || member.role !== "dm") {
+        return res.status(403).json({ message: "Not authorized - DM only" });
+      }
+
+      await storage.deleteSessionOverride(id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting session override:", error);
+      res.status(500).json({ message: "Failed to delete session override" });
     }
   });
 

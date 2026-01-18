@@ -7,10 +7,12 @@ import {
   availability, Availability, InsertAvailability,
   diceRolls, DiceRoll, InsertDiceRoll,
   backlinks, Backlink, InsertBacklink,
+  userAvailability, UserAvailability, InsertUserAvailability,
+  sessionOverrides, SessionOverride, InsertSessionOverride,
   users
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, gte } from "drizzle-orm";
+import { eq, and, desc, gte, lte } from "drizzle-orm";
 
 import type { User } from "@shared/schema";
 
@@ -51,6 +53,7 @@ export interface IStorage {
   getSessions(teamId: string): Promise<GameSession[]>;
   getSession(id: string): Promise<GameSession | undefined>;
   createSession(session: InsertGameSession): Promise<GameSession>;
+  updateSession(id: string, data: Partial<InsertGameSession>): Promise<GameSession>; // PRD-010
   deleteSession(id: string): Promise<void>;
 
   // Availability
@@ -69,6 +72,19 @@ export interface IStorage {
   deleteBacklink(id: string): Promise<void>;
   deleteBacklinksBySource(sourceNoteId: string): Promise<void>;
   deleteBacklinksByTarget(targetNoteId: string): Promise<void>;
+
+  // User Availability (PRD-009)
+  getUserAvailability(teamId: string, startDate: Date, endDate: Date): Promise<UserAvailability[]>;
+  getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined>;
+  createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability>;
+  updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability>;
+  deleteUserAvailability(id: string): Promise<void>;
+
+  // Session Overrides (PRD-010A)
+  getSessionOverrides(teamId: string): Promise<SessionOverride[]>;
+  getSessionOverride(teamId: string, occurrenceKey: string): Promise<SessionOverride | undefined>;
+  upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride>;
+  deleteSessionOverride(id: string): Promise<void>;
 }
 
 function generateInviteCode(): string {
@@ -275,6 +291,15 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
+  async updateSession(id: string, data: Partial<InsertGameSession>): Promise<GameSession> {
+    const [updated] = await db
+      .update(gameSessions)
+      .set(data)
+      .where(eq(gameSessions.id, id))
+      .returning();
+    return updated;
+  }
+
   async deleteSession(id: string): Promise<void> {
     await db.delete(availability).where(eq(availability.sessionId, id));
     await db.delete(gameSessions).where(eq(gameSessions.id, id));
@@ -363,6 +388,108 @@ export class DatabaseStorage implements IStorage {
 
   async deleteBacklinksByTarget(targetNoteId: string): Promise<void> {
     await db.delete(backlinks).where(eq(backlinks.targetNoteId, targetNoteId));
+  }
+
+  // User Availability (PRD-009)
+  async getUserAvailability(teamId: string, startDate: Date, endDate: Date): Promise<UserAvailability[]> {
+    return await db
+      .select()
+      .from(userAvailability)
+      .where(
+        and(
+          eq(userAvailability.teamId, teamId),
+          gte(userAvailability.date, startDate),
+          lte(userAvailability.date, endDate)
+        )
+      )
+      .orderBy(userAvailability.date);
+  }
+
+  async getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined> {
+    // Normalize the date to start of day for comparison
+    const startOfDay = new Date(date);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(date);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const [result] = await db
+      .select()
+      .from(userAvailability)
+      .where(
+        and(
+          eq(userAvailability.teamId, teamId),
+          eq(userAvailability.userId, userId),
+          gte(userAvailability.date, startOfDay),
+          lte(userAvailability.date, endOfDay)
+        )
+      );
+    return result;
+  }
+
+  async createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability> {
+    const [created] = await db.insert(userAvailability).values(data).returning();
+    return created;
+  }
+
+  async updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability> {
+    const [updated] = await db
+      .update(userAvailability)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(userAvailability.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteUserAvailability(id: string): Promise<void> {
+    await db.delete(userAvailability).where(eq(userAvailability.id, id));
+  }
+
+  // Session Overrides (PRD-010A)
+  async getSessionOverrides(teamId: string): Promise<SessionOverride[]> {
+    return await db
+      .select()
+      .from(sessionOverrides)
+      .where(eq(sessionOverrides.teamId, teamId))
+      .orderBy(sessionOverrides.occurrenceKey);
+  }
+
+  async getSessionOverride(teamId: string, occurrenceKey: string): Promise<SessionOverride | undefined> {
+    const [override] = await db
+      .select()
+      .from(sessionOverrides)
+      .where(
+        and(
+          eq(sessionOverrides.teamId, teamId),
+          eq(sessionOverrides.occurrenceKey, occurrenceKey)
+        )
+      );
+    return override;
+  }
+
+  async upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride> {
+    // Check if override already exists for this team/occurrenceKey
+    const existing = await this.getSessionOverride(data.teamId, data.occurrenceKey);
+
+    if (existing) {
+      const [updated] = await db
+        .update(sessionOverrides)
+        .set({
+          status: data.status,
+          scheduledAtOverride: data.scheduledAtOverride,
+          updatedBy: data.updatedBy,
+          updatedAt: new Date(),
+        })
+        .where(eq(sessionOverrides.id, existing.id))
+        .returning();
+      return updated;
+    }
+
+    const [created] = await db.insert(sessionOverrides).values(data).returning();
+    return created;
+  }
+
+  async deleteSessionOverride(id: string): Promise<void> {
+    await db.delete(sessionOverrides).where(eq(sessionOverrides.id, id));
   }
 }
 

@@ -342,6 +342,12 @@ export default function TeamWizard() {
                     placeholder={isTabletop ? "e.g., The Dragon's Hoard" : "e.g., Friday Night Book Club"}
                     value={data.teamName}
                     onChange={(e) => setData({ ...data, teamName: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.nativeEvent.isComposing && canProceed()) {
+                        e.preventDefault();
+                        handleNext();
+                      }
+                    }}
                     data-testid="input-team-name"
                   />
                 </div>

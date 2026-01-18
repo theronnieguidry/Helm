@@ -62,6 +62,7 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
     startTime: team.startTime || "19:00",
     timezone: team.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
     minAttendanceThreshold: team.minAttendanceThreshold || 2,
+    defaultSessionDurationMinutes: team.defaultSessionDurationMinutes || 180,
     diceMode: team.diceMode,
   });
 
@@ -102,13 +103,14 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
       const response = await apiRequest("PATCH", `/api/teams/${team.id}`, {
         name: data.name,
         recurrenceFrequency: data.recurrenceFrequency || null,
-        dayOfWeek: data.recurrenceFrequency === "weekly" || data.recurrenceFrequency === "biweekly" 
-          ? data.dayOfWeek 
+        dayOfWeek: data.recurrenceFrequency === "weekly" || data.recurrenceFrequency === "biweekly"
+          ? data.dayOfWeek
           : null,
         daysOfMonth: data.recurrenceFrequency === "monthly" ? data.daysOfMonth : null,
         startTime: data.startTime,
         timezone: data.timezone,
         minAttendanceThreshold: data.minAttendanceThreshold,
+        defaultSessionDurationMinutes: data.defaultSessionDurationMinutes,
         diceMode: data.diceMode,
       });
       return response.json();
@@ -433,6 +435,28 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
                   data-testid="input-timezone"
                 />
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="sessionDuration">Session Duration</Label>
+              <p className="text-sm text-muted-foreground mb-2">
+                How long your typical session lasts (used for availability matching)
+              </p>
+              <Select
+                value={formData.defaultSessionDurationMinutes.toString()}
+                onValueChange={(value) => setFormData({ ...formData, defaultSessionDurationMinutes: parseInt(value) })}
+              >
+                <SelectTrigger className="w-[180px]" data-testid="select-session-duration">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="120">2 hours</SelectItem>
+                  <SelectItem value="180">3 hours</SelectItem>
+                  <SelectItem value="240">4 hours</SelectItem>
+                  <SelectItem value="300">5 hours</SelectItem>
+                  <SelectItem value="360">6 hours</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </CardContent>
         </Card>

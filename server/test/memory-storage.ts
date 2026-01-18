@@ -1,6 +1,6 @@
 import type { IStorage } from "../storage";
 import {
-  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS, QUEST_STATUSES,
+  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS, QUEST_STATUSES, SESSION_STATUSES,
   type Team, type InsertTeam,
   type TeamMember, type InsertTeamMember,
   type Invite, type InsertInvite,
@@ -9,6 +9,8 @@ import {
   type Availability, type InsertAvailability,
   type DiceRoll, type InsertDiceRoll,
   type Backlink, type InsertBacklink,
+  type UserAvailability, type InsertUserAvailability,
+  type SessionOverride, type InsertSessionOverride,
   type User,
   type TeamType,
   type DiceMode,
@@ -17,6 +19,7 @@ import {
   type AvailabilityStatus,
   type QuestStatus,
   type ContentBlock,
+  type SessionStatus,
 } from "@shared/schema";
 
 function generateId(): string {
@@ -67,6 +70,14 @@ function validateQuestStatus(value: string | null | undefined): QuestStatus | nu
   return value as QuestStatus;
 }
 
+function validateSessionStatus(value: string | null | undefined): SessionStatus {
+  if (value === null || value === undefined) return "scheduled";
+  if (!SESSION_STATUSES.includes(value as SessionStatus)) {
+    throw new Error(`Invalid session status: ${value}`);
+  }
+  return value as SessionStatus;
+}
+
 export class MemoryStorage implements IStorage {
   private users: Map<string, User> = new Map();
   private teams: Map<string, Team> = new Map();
@@ -77,6 +88,8 @@ export class MemoryStorage implements IStorage {
   private availabilityMap: Map<string, Availability> = new Map();
   private diceRolls: Map<string, DiceRoll> = new Map();
   private backlinks: Map<string, Backlink> = new Map();
+  private userAvailabilityMap: Map<string, UserAvailability> = new Map();
+  private sessionOverridesMap: Map<string, SessionOverride> = new Map();
 
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
@@ -319,16 +332,26 @@ export class MemoryStorage implements IStorage {
 
   async createSession(session: InsertGameSession): Promise<GameSession> {
     const id = generateId();
+    const status = validateSessionStatus(session.status);
     const newSession: GameSession = {
       id,
       teamId: session.teamId,
       scheduledAt: session.scheduledAt,
       isOverride: session.isOverride ?? false,
       notes: session.notes ?? null,
+      status,
       createdAt: new Date(),
     };
     this.sessions.set(id, newSession);
     return newSession;
+  }
+
+  async updateSession(id: string, data: Partial<InsertGameSession>): Promise<GameSession> {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Session not found");
+    const updated: GameSession = { ...session, ...data } as GameSession;
+    this.sessions.set(id, updated);
+    return updated;
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -444,6 +467,107 @@ export class MemoryStorage implements IStorage {
     }
   }
 
+  // User Availability (PRD-009)
+  async getUserAvailability(teamId: string, startDate: Date, endDate: Date): Promise<UserAvailability[]> {
+    return Array.from(this.userAvailabilityMap.values())
+      .filter(ua => {
+        const uaDate = new Date(ua.date);
+        return ua.teamId === teamId && uaDate >= startDate && uaDate <= endDate;
+      })
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }
+
+  async getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined> {
+    const startOfDay = new Date(date);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(date);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    return Array.from(this.userAvailabilityMap.values()).find(ua => {
+      const uaDate = new Date(ua.date);
+      return ua.teamId === teamId &&
+             ua.userId === userId &&
+             uaDate >= startOfDay &&
+             uaDate <= endOfDay;
+    });
+  }
+
+  async createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability> {
+    const id = generateId();
+    const newUserAvailability: UserAvailability = {
+      id,
+      teamId: data.teamId,
+      userId: data.userId,
+      date: data.date,
+      startTime: data.startTime,
+      endTime: data.endTime,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.userAvailabilityMap.set(id, newUserAvailability);
+    return newUserAvailability;
+  }
+
+  async updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability> {
+    const existing = this.userAvailabilityMap.get(id);
+    if (!existing) throw new Error("User availability not found");
+    const updated: UserAvailability = { ...existing, ...data, updatedAt: new Date() };
+    this.userAvailabilityMap.set(id, updated);
+    return updated;
+  }
+
+  async deleteUserAvailability(id: string): Promise<void> {
+    this.userAvailabilityMap.delete(id);
+  }
+
+  // Session Overrides (PRD-010A)
+  async getSessionOverrides(teamId: string): Promise<SessionOverride[]> {
+    return Array.from(this.sessionOverridesMap.values())
+      .filter(so => so.teamId === teamId)
+      .sort((a, b) => a.occurrenceKey.localeCompare(b.occurrenceKey));
+  }
+
+  async getSessionOverride(teamId: string, occurrenceKey: string): Promise<SessionOverride | undefined> {
+    return Array.from(this.sessionOverridesMap.values()).find(
+      so => so.teamId === teamId && so.occurrenceKey === occurrenceKey
+    );
+  }
+
+  async upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride> {
+    const status = validateSessionStatus(data.status);
+    const existing = await this.getSessionOverride(data.teamId, data.occurrenceKey);
+
+    if (existing) {
+      const updated: SessionOverride = {
+        ...existing,
+        status,
+        scheduledAtOverride: data.scheduledAtOverride ?? null,
+        updatedBy: data.updatedBy,
+        updatedAt: new Date(),
+      };
+      this.sessionOverridesMap.set(existing.id, updated);
+      return updated;
+    }
+
+    const id = generateId();
+    const newOverride: SessionOverride = {
+      id,
+      teamId: data.teamId,
+      occurrenceKey: data.occurrenceKey,
+      status,
+      scheduledAtOverride: data.scheduledAtOverride ?? null,
+      updatedBy: data.updatedBy,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.sessionOverridesMap.set(id, newOverride);
+    return newOverride;
+  }
+
+  async deleteSessionOverride(id: string): Promise<void> {
+    this.sessionOverridesMap.delete(id);
+  }
+
   clear(): void {
     this.users.clear();
     this.teams.clear();
@@ -454,5 +578,7 @@ export class MemoryStorage implements IStorage {
     this.availabilityMap.clear();
     this.diceRolls.clear();
     this.backlinks.clear();
+    this.userAvailabilityMap.clear();
+    this.sessionOverridesMap.clear();
   }
 }
