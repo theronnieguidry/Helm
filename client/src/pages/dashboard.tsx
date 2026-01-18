@@ -5,18 +5,20 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { 
-  Calendar, 
-  BookOpen, 
-  Users, 
-  Dices, 
-  Plus, 
-  Clock, 
+import {
+  Calendar,
+  BookOpen,
+  Users,
+  Dices,
+  Plus,
+  Clock,
   MapPin,
   User,
   ScrollText,
   Copy,
-  Check
+  Check,
+  FolderOpen,
+  FileText
 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -35,6 +37,11 @@ const NOTE_TYPE_ICONS: Record<NoteType, typeof MapPin> = {
   poi: MapPin,
   quest: ScrollText,
   session_log: BookOpen,
+  // PRD-015: Import types
+  person: User,
+  place: MapPin,
+  collection: FolderOpen,
+  note: FileText,
 };
 
 const NOTE_TYPE_COLORS: Record<NoteType, string> = {
@@ -44,6 +51,11 @@ const NOTE_TYPE_COLORS: Record<NoteType, string> = {
   poi: "bg-purple-500/10 text-purple-500",
   quest: "bg-red-500/10 text-red-500",
   session_log: "bg-amber-500/10 text-amber-500",
+  // PRD-015: Import types
+  person: "bg-cyan-500/10 text-cyan-500",
+  place: "bg-teal-500/10 text-teal-500",
+  collection: "bg-indigo-500/10 text-indigo-500",
+  note: "bg-gray-500/10 text-gray-500",
 };
 
 export default function DashboardContent({ team }: DashboardContentProps) {

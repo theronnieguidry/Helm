@@ -1,9 +1,59 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import multer from "multer";
+import AdmZip from "adm-zip";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated, registerAuthRoutes } from "./replit_integrations/auth";
-import { TEAM_TYPE_DICE_MODE, SESSION_STATUSES, type TeamType, type AvailabilityStatus, type SessionStatus } from "@shared/schema";
+import { TEAM_TYPE_DICE_MODE, SESSION_STATUSES, type TeamType, type AvailabilityStatus, type SessionStatus, type NoteType, type QuestStatus, type ImportVisibility, type ImportRunStats } from "@shared/schema";
 import { generateSessionCandidates } from "@shared/recurrence";
+import {
+  processNuclinoExport,
+  resolveNuclinoLinks,
+  type NuclinoPage,
+  type PageClassification,
+  type ImportSummary,
+  type CollectionInfo,
+} from "@shared/nuclino-parser";
+
+// PRD-015: Multer config for ZIP file uploads (store in memory)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB max
+  },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === "application/zip" || file.mimetype === "application/x-zip-compressed" || file.originalname.endsWith(".zip")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only ZIP files are allowed"));
+    }
+  },
+});
+
+// PRD-015: In-memory cache for import plans (15-minute TTL)
+interface ImportPlan {
+  teamId: string;
+  pages: NuclinoPage[];
+  collections: Map<string, CollectionInfo>;
+  classifications: Map<string, PageClassification>;
+  summary: ImportSummary;
+  createdAt: Date;
+}
+const importPlanCache = new Map<string, ImportPlan>();
+
+// Clean up expired import plans (older than 15 minutes)
+function cleanupExpiredPlans() {
+  const now = Date.now();
+  const TTL = 15 * 60 * 1000; // 15 minutes
+  for (const [id, plan] of Array.from(importPlanCache.entries())) {
+    if (now - plan.createdAt.getTime() > TTL) {
+      importPlanCache.delete(id);
+    }
+  }
+}
+
+// Run cleanup every 5 minutes
+setInterval(cleanupExpiredPlans, 5 * 60 * 1000);
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -348,7 +398,7 @@ export async function registerRoutes(
     try {
       const userId = req.user.claims.sub;
       const { teamId, noteId } = req.params;
-      
+
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
@@ -368,6 +418,837 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting note:", error);
       res.status(500).json({ message: "Failed to delete note" });
+    }
+  });
+
+  // Get backlinks for a note (PRD-005)
+  app.get("/api/teams/:teamId/notes/:noteId/backlinks", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const note = await storage.getNote(noteId);
+      if (!note || note.teamId !== teamId) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      const backlinks = await storage.getBacklinks(noteId);
+      res.json(backlinks);
+    } catch (error) {
+      console.error("Error fetching backlinks:", error);
+      res.status(500).json({ message: "Failed to fetch backlinks" });
+    }
+  });
+
+  // Create backlink (PRD-005)
+  app.post("/api/teams/:teamId/notes/:noteId/backlinks", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+      const { sourceNoteId, sourceBlockId, textSnippet } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Verify target note exists and belongs to team
+      const targetNote = await storage.getNote(noteId);
+      if (!targetNote || targetNote.teamId !== teamId) {
+        return res.status(404).json({ message: "Target note not found" });
+      }
+
+      // Verify source note exists and belongs to team
+      const sourceNote = await storage.getNote(sourceNoteId);
+      if (!sourceNote || sourceNote.teamId !== teamId) {
+        return res.status(400).json({ message: "Source note not found" });
+      }
+
+      const backlink = await storage.createBacklink({
+        sourceNoteId,
+        sourceBlockId,
+        targetNoteId: noteId,
+        textSnippet,
+      });
+      res.json(backlink);
+    } catch (error) {
+      console.error("Error creating backlink:", error);
+      res.status(500).json({ message: "Failed to create backlink" });
+    }
+  });
+
+  // Delete backlink (PRD-005)
+  app.delete("/api/teams/:teamId/backlinks/:backlinkId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, backlinkId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      await storage.deleteBacklink(backlinkId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting backlink:", error);
+      res.status(500).json({ message: "Failed to delete backlink" });
+    }
+  });
+
+  // Get outgoing links from a note (PRD-005)
+  app.get("/api/teams/:teamId/notes/:noteId/outgoing-links", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const note = await storage.getNote(noteId);
+      if (!note || note.teamId !== teamId) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      const outgoingLinks = await storage.getOutgoingLinks(noteId);
+      res.json(outgoingLinks);
+    } catch (error) {
+      console.error("Error fetching outgoing links:", error);
+      res.status(500).json({ message: "Failed to fetch outgoing links" });
+    }
+  });
+
+  // PRD-015: Nuclino Import - Parse ZIP and generate import plan
+  app.post("/api/teams/:teamId/imports/nuclino/parse", isAuthenticated, upload.single("zipFile"), async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: "No ZIP file provided" });
+      }
+
+      // Extract ZIP contents
+      const zip = new AdmZip(req.file.buffer);
+      const zipEntries = zip.getEntries();
+
+      // Filter for .md files and extract content
+      const mdEntries = zipEntries
+        .filter(entry => !entry.isDirectory && entry.entryName.toLowerCase().endsWith(".md"))
+        .map(entry => ({
+          filename: entry.entryName,
+          content: entry.getData().toString("utf8"),
+          lastModified: entry.header.time ? new Date(entry.header.time) : undefined,
+        }));
+
+      if (mdEntries.length === 0) {
+        return res.status(400).json({ message: "ZIP file contains no .md files" });
+      }
+
+      // Process the export
+      const { pages, collections, classifications, summary } = processNuclinoExport(mdEntries);
+
+      // Generate unique import plan ID
+      const importPlanId = `${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      // Store in cache
+      importPlanCache.set(importPlanId, {
+        teamId,
+        pages,
+        collections,
+        classifications,
+        summary,
+        createdAt: new Date(),
+      });
+
+      // Build page preview list
+      const pagesList = pages.map(page => {
+        const classification = classifications.get(page.sourcePageId);
+        return {
+          sourcePageId: page.sourcePageId,
+          title: page.title,
+          noteType: classification?.noteType || "note",
+          questStatus: classification?.questStatus,
+          isEmpty: page.isEmpty,
+        };
+      });
+
+      res.json({
+        importPlanId,
+        summary,
+        pages: pagesList,
+      });
+    } catch (error) {
+      console.error("Error parsing Nuclino ZIP:", error);
+      res.status(500).json({ message: "Failed to parse Nuclino export" });
+    }
+  });
+
+  // PRD-015: Nuclino Import - Commit import plan (updated for PRD-015A)
+  app.post("/api/teams/:teamId/imports/nuclino/commit", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { importPlanId, options } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Retrieve import plan from cache
+      const plan = importPlanCache.get(importPlanId);
+      if (!plan) {
+        return res.status(404).json({ message: "Import plan not found or expired" });
+      }
+
+      if (plan.teamId !== teamId) {
+        return res.status(403).json({ message: "Import plan belongs to a different team" });
+      }
+
+      const importEmptyPages = options?.importEmptyPages !== false;
+      const defaultVisibility: ImportVisibility = options?.defaultVisibility || "private";
+      const isPrivate = defaultVisibility === "private";
+      const pagesToImport = plan.pages.filter(p => importEmptyPages || !p.isEmpty);
+
+      // PRD-015A: Create import run record FIRST
+      const importRun = await storage.createImportRun({
+        teamId,
+        sourceSystem: "NUCLINO",
+        createdByUserId: userId,
+        status: "completed",
+        options: {
+          importEmptyPages,
+          defaultVisibility,
+        },
+        stats: null, // Will update at end
+      });
+
+      // First pass: Create all notes to get their IDs
+      const sourcePageIdToNoteId = new Map<string, string>();
+      let created = 0;
+      let updated = 0;
+      let skipped = 0;
+      let linksResolved = 0;
+      const warnings: string[] = [];
+
+      for (const page of pagesToImport) {
+        const classification = plan.classifications.get(page.sourcePageId);
+        const noteType = (classification?.noteType || "note") as NoteType;
+        const questStatus = classification?.questStatus as QuestStatus | undefined;
+
+        try {
+          // PRD-015A: Check if existing note for snapshot
+          const existingNote = await storage.findNoteBySourceId(teamId, "NUCLINO", page.sourcePageId);
+
+          if (existingNote) {
+            // PRD-015A FR-6: Create snapshot before updating
+            await storage.createNoteImportSnapshot({
+              noteId: existingNote.id,
+              importRunId: importRun.id,
+              previousTitle: existingNote.title,
+              previousContent: existingNote.content,
+              previousNoteType: existingNote.noteType,
+              previousQuestStatus: existingNote.questStatus,
+              previousContentMarkdown: existingNote.contentMarkdown,
+              previousContentMarkdownResolved: existingNote.contentMarkdownResolved,
+              previousIsPrivate: existingNote.isPrivate,
+            });
+
+            // Update existing note with new fields
+            const updatedNote = await storage.updateNote(existingNote.id, {
+              title: page.title,
+              content: page.content,
+              noteType,
+              questStatus: questStatus ?? null,
+              contentMarkdown: page.contentRaw,
+              contentMarkdownResolved: page.content,
+              importRunId: importRun.id,
+              updatedByUserId: userId,
+              isPrivate,
+            });
+
+            sourcePageIdToNoteId.set(page.sourcePageId, updatedNote.id);
+            updated++;
+          } else {
+            // Create new note with PRD-015A fields
+            const newNote = await storage.createNote({
+              teamId,
+              authorId: userId,
+              title: page.title,
+              content: page.content,
+              noteType,
+              questStatus: questStatus ?? null,
+              sourceSystem: "NUCLINO",
+              sourcePageId: page.sourcePageId,
+              contentMarkdown: page.contentRaw,
+              contentMarkdownResolved: page.content,
+              importRunId: importRun.id,
+              createdByUserId: userId,
+              updatedByUserId: userId,
+              isPrivate,
+            });
+
+            sourcePageIdToNoteId.set(page.sourcePageId, newNote.id);
+            created++;
+          }
+        } catch (err) {
+          console.error(`Error importing page ${page.title}:`, err);
+          warnings.push(`Failed to import: ${page.title}`);
+          skipped++;
+        }
+      }
+
+      // Second pass: Resolve links and update content
+      for (const page of pagesToImport) {
+        const noteId = sourcePageIdToNoteId.get(page.sourcePageId);
+        if (!noteId) continue;
+
+        const { resolved, unresolvedLinks } = resolveNuclinoLinks(page.content, sourcePageIdToNoteId);
+
+        // Update note with resolved content
+        await storage.updateNote(noteId, {
+          contentMarkdownResolved: resolved,
+        });
+
+        // Track unresolved links as warnings
+        for (const linkText of unresolvedLinks) {
+          warnings.push(`Unresolved link in "${page.title}": ${linkText}`);
+        }
+
+        // Create note_links (backlinks) for resolved links
+        for (const link of page.links) {
+          const targetNoteId = sourcePageIdToNoteId.get(link.targetPageId);
+          if (targetNoteId && targetNoteId !== noteId) {
+            try {
+              await storage.createBacklink({
+                sourceNoteId: noteId,
+                targetNoteId,
+                textSnippet: link.text,
+              });
+              linksResolved++;
+            } catch (err) {
+              // Ignore duplicate backlink errors
+            }
+          }
+        }
+      }
+
+      // PRD-015A: Update import run with final stats
+      const stats: ImportRunStats = {
+        totalPagesDetected: plan.summary.totalPages,
+        notesCreated: created,
+        notesUpdated: updated,
+        notesSkipped: skipped,
+        emptyPagesImported: importEmptyPages ? plan.summary.emptyPages : 0,
+        linksResolved,
+        warningsCount: warnings.length,
+      };
+      await storage.updateImportRun(importRun.id, { stats });
+
+      // Clean up the import plan from cache
+      importPlanCache.delete(importPlanId);
+
+      res.json({
+        importRunId: importRun.id,
+        created,
+        updated,
+        skipped,
+        warnings: warnings.slice(0, 50), // Limit warnings to 50
+      });
+    } catch (error) {
+      console.error("Error committing Nuclino import:", error);
+      res.status(500).json({ message: "Failed to commit import" });
+    }
+  });
+
+  // PRD-015A: List import runs for a team
+  app.get("/api/teams/:teamId/imports", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const importRuns = await storage.getImportRuns(teamId);
+
+      // Filter out deleted imports and add importer name
+      const activeRuns = importRuns.filter(r => r.status !== "deleted");
+      const runsWithUsers = await Promise.all(
+        activeRuns.map(async (run) => {
+          const user = await storage.getUser(run.createdByUserId);
+          return {
+            ...run,
+            importerName: user
+              ? `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email
+              : "Unknown",
+          };
+        })
+      );
+
+      res.json(runsWithUsers);
+    } catch (error) {
+      console.error("Error fetching import runs:", error);
+      res.status(500).json({ message: "Failed to fetch import runs" });
+    }
+  });
+
+  // PRD-015A: Get import run details
+  app.get("/api/teams/:teamId/imports/:importId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, importId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const importRun = await storage.getImportRun(importId);
+      if (!importRun || importRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Import run not found" });
+      }
+
+      // Get notes created by this import
+      const notes = await storage.getNotesByImportRun(importId);
+
+      // Get importer name
+      const user = await storage.getUser(importRun.createdByUserId);
+
+      res.json({
+        ...importRun,
+        importerName: user
+          ? `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email
+          : "Unknown",
+        notes: notes.map(n => ({ id: n.id, title: n.title, noteType: n.noteType })),
+      });
+    } catch (error) {
+      console.error("Error fetching import run:", error);
+      res.status(500).json({ message: "Failed to fetch import run" });
+    }
+  });
+
+  // PRD-015A: Delete/rollback import run
+  app.delete("/api/teams/:teamId/imports/:importId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, importId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const importRun = await storage.getImportRun(importId);
+      if (!importRun || importRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Import run not found" });
+      }
+
+      // Permission check: importer can delete own, DM can delete any
+      const isDM = member.role === "dm";
+      const isOwner = importRun.createdByUserId === userId;
+
+      if (!isDM && !isOwner) {
+        return res.status(403).json({ message: "Not authorized to delete this import" });
+      }
+
+      // PRD-015A FR-6: Restore updated notes from snapshots
+      const snapshots = await storage.getSnapshotsByImportRun(importId);
+      for (const snapshot of snapshots) {
+        await storage.restoreNoteFromSnapshot(snapshot.id);
+      }
+
+      // Delete notes that were CREATED by this import (not updated)
+      // Notes with snapshots were updated, so we already restored them above
+      const snapshotNoteIds = new Set(snapshots.map(s => s.noteId));
+      const notesToDelete = (await storage.getNotesByImportRun(importId))
+        .filter(n => !snapshotNoteIds.has(n.id));
+
+      for (const note of notesToDelete) {
+        await storage.deleteNote(note.id);
+      }
+
+      // Delete snapshots
+      await storage.deleteSnapshotsByImportRun(importId);
+
+      // Mark import run as deleted
+      await storage.updateImportRunStatus(importId, "deleted");
+
+      res.json({
+        message: "Import rolled back successfully",
+        notesDeleted: notesToDelete.length,
+        notesRestored: snapshots.length,
+      });
+    } catch (error) {
+      console.error("Error deleting import run:", error);
+      res.status(500).json({ message: "Failed to delete import run" });
+    }
+  });
+
+  // PRD-016: Trigger AI enrichment for an import
+  app.post("/api/teams/:teamId/imports/:importId/enrich", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, importId } = req.params;
+      const { overrideExistingClassifications = false } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const importRun = await storage.getImportRun(importId);
+      if (!importRun || importRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Import run not found" });
+      }
+
+      // Check if enrichment already exists
+      const existingEnrichment = await storage.getEnrichmentRunByImportId(importId);
+      if (existingEnrichment && existingEnrichment.status !== "failed") {
+        return res.status(400).json({
+          message: "Enrichment already exists for this import",
+          enrichmentRunId: existingEnrichment.id,
+          status: existingEnrichment.status,
+        });
+      }
+
+      // Create enrichment run
+      const enrichmentRun = await storage.createEnrichmentRun({
+        importRunId: importId,
+        teamId,
+        createdByUserId: userId,
+        status: "pending",
+      });
+
+      // Import the worker dynamically to avoid circular dependencies
+      const { enqueueEnrichment } = await import("./jobs/enrichment-worker");
+
+      // Enqueue the enrichment job
+      enqueueEnrichment({
+        enrichmentRunId: enrichmentRun.id,
+        importRunId: importId,
+        teamId,
+        overrideExisting: overrideExistingClassifications,
+      });
+
+      res.json({
+        enrichmentRunId: enrichmentRun.id,
+        status: "pending",
+      });
+    } catch (error) {
+      console.error("Error triggering enrichment:", error);
+      res.status(500).json({ message: "Failed to trigger enrichment" });
+    }
+  });
+
+  // PRD-016: Get enrichment run status and results
+  app.get("/api/teams/:teamId/enrichments/:enrichmentRunId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, enrichmentRunId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const enrichmentRun = await storage.getEnrichmentRun(enrichmentRunId);
+      if (!enrichmentRun || enrichmentRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Enrichment run not found" });
+      }
+
+      // Get classifications and relationships
+      const classifications = await storage.getNoteClassificationsByEnrichmentRun(enrichmentRunId);
+      const relationships = await storage.getNoteRelationshipsByEnrichmentRun(enrichmentRunId);
+
+      // Enrich classifications with note titles
+      const enrichedClassifications = await Promise.all(
+        classifications.map(async (c) => {
+          const note = await storage.getNote(c.noteId);
+          return {
+            ...c,
+            noteTitle: note?.title || "Unknown",
+          };
+        })
+      );
+
+      // Enrich relationships with note titles
+      const enrichedRelationships = await Promise.all(
+        relationships.map(async (r) => {
+          const fromNote = await storage.getNote(r.fromNoteId);
+          const toNote = await storage.getNote(r.toNoteId);
+          return {
+            ...r,
+            fromNoteTitle: fromNote?.title || "Unknown",
+            toNoteTitle: toNote?.title || "Unknown",
+          };
+        })
+      );
+
+      res.json({
+        ...enrichmentRun,
+        classifications: enrichedClassifications,
+        relationships: enrichedRelationships,
+      });
+    } catch (error) {
+      console.error("Error fetching enrichment run:", error);
+      res.status(500).json({ message: "Failed to fetch enrichment run" });
+    }
+  });
+
+  // PRD-016: Update classification status (approve/reject)
+  app.patch("/api/teams/:teamId/classifications/:classificationId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, classificationId } = req.params;
+      const { status } = req.body;
+
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Get classification to verify team ownership
+      const classifications = await Promise.all(
+        (await storage.getNoteClassificationsByEnrichmentRun("")).map(async (c) => {
+          const enrichmentRun = await storage.getEnrichmentRun(c.enrichmentRunId);
+          return { ...c, teamId: enrichmentRun?.teamId };
+        })
+      );
+
+      const classification = classifications.find(
+        (c) => c.id === classificationId && c.teamId === teamId
+      );
+
+      if (!classification) {
+        // Try to get it directly by looking up the note
+        const allEnrichmentRuns = await Promise.all(
+          (await storage.getImportRuns(teamId)).map((ir) =>
+            storage.getEnrichmentRunByImportId(ir.id)
+          )
+        );
+
+        let found = false;
+        for (const er of allEnrichmentRuns) {
+          if (!er) continue;
+          const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
+          if (erClassifications.some((c) => c.id === classificationId)) {
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) {
+          return res.status(404).json({ message: "Classification not found" });
+        }
+      }
+
+      const updated = await storage.updateNoteClassificationStatus(classificationId, status, userId);
+
+      // If approved, update the note's type
+      if (status === "approved") {
+        const noteTypeMap: Record<string, string> = {
+          Person: "person",
+          Place: "place",
+          Quest: "quest",
+          SessionLog: "session_log",
+          Note: "note",
+        };
+        const newNoteType = noteTypeMap[updated.inferredType] || "note";
+        await storage.updateNote(updated.noteId, { noteType: newNoteType as NoteType });
+      }
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating classification:", error);
+      res.status(500).json({ message: "Failed to update classification" });
+    }
+  });
+
+  // PRD-016: Bulk approve classifications
+  app.post("/api/teams/:teamId/enrichments/:enrichmentRunId/classifications/bulk-approve", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, enrichmentRunId } = req.params;
+      const { classificationIds, approveHighConfidence, threshold = 0.80 } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const enrichmentRun = await storage.getEnrichmentRun(enrichmentRunId);
+      if (!enrichmentRun || enrichmentRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Enrichment run not found" });
+      }
+
+      let idsToApprove: string[] = [];
+
+      if (approveHighConfidence) {
+        // Get all high-confidence classifications
+        const classifications = await storage.getNoteClassificationsByEnrichmentRun(enrichmentRunId);
+        idsToApprove = classifications
+          .filter((c) => c.status === "pending" && c.confidence >= threshold)
+          .map((c) => c.id);
+      } else if (classificationIds && Array.isArray(classificationIds)) {
+        idsToApprove = classificationIds;
+      }
+
+      let approved = 0;
+      for (const id of idsToApprove) {
+        const updated = await storage.updateNoteClassificationStatus(id, "approved", userId);
+        // Update note type
+        const noteTypeMap: Record<string, string> = {
+          Person: "person",
+          Place: "place",
+          Quest: "quest",
+          SessionLog: "session_log",
+          Note: "note",
+        };
+        const newNoteType = noteTypeMap[updated.inferredType] || "note";
+        await storage.updateNote(updated.noteId, { noteType: newNoteType as NoteType });
+        approved++;
+      }
+
+      res.json({ approved });
+    } catch (error) {
+      console.error("Error bulk approving classifications:", error);
+      res.status(500).json({ message: "Failed to bulk approve classifications" });
+    }
+  });
+
+  // PRD-016: Update relationship status (approve/reject)
+  app.patch("/api/teams/:teamId/relationships/:relationshipId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, relationshipId } = req.params;
+      const { status } = req.body;
+
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Verify relationship belongs to this team by checking enrichment run
+      const allEnrichmentRuns = await Promise.all(
+        (await storage.getImportRuns(teamId)).map((ir) =>
+          storage.getEnrichmentRunByImportId(ir.id)
+        )
+      );
+
+      let found = false;
+      for (const er of allEnrichmentRuns) {
+        if (!er) continue;
+        const erRelationships = await storage.getNoteRelationshipsByEnrichmentRun(er.id);
+        if (erRelationships.some((r) => r.id === relationshipId)) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        return res.status(404).json({ message: "Relationship not found" });
+      }
+
+      const updated = await storage.updateNoteRelationshipStatus(relationshipId, status, userId);
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating relationship:", error);
+      res.status(500).json({ message: "Failed to update relationship" });
+    }
+  });
+
+  // PRD-016: Bulk approve relationships
+  app.post("/api/teams/:teamId/enrichments/:enrichmentRunId/relationships/bulk-approve", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, enrichmentRunId } = req.params;
+      const { relationshipIds, approveHighConfidence, threshold = 0.80 } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const enrichmentRun = await storage.getEnrichmentRun(enrichmentRunId);
+      if (!enrichmentRun || enrichmentRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Enrichment run not found" });
+      }
+
+      let idsToApprove: string[] = [];
+
+      if (approveHighConfidence) {
+        const relationships = await storage.getNoteRelationshipsByEnrichmentRun(enrichmentRunId);
+        idsToApprove = relationships
+          .filter((r) => r.status === "pending" && r.confidence >= threshold)
+          .map((r) => r.id);
+      } else if (relationshipIds && Array.isArray(relationshipIds)) {
+        idsToApprove = relationshipIds;
+      }
+
+      let approved = 0;
+      for (const id of idsToApprove) {
+        await storage.updateNoteRelationshipStatus(id, "approved", userId);
+        approved++;
+      }
+
+      res.json({ approved });
+    } catch (error) {
+      console.error("Error bulk approving relationships:", error);
+      res.status(500).json({ message: "Failed to bulk approve relationships" });
+    }
+  });
+
+  // PRD-016: Delete/undo enrichment run
+  app.delete("/api/teams/:teamId/enrichments/:enrichmentRunId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, enrichmentRunId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const enrichmentRun = await storage.getEnrichmentRun(enrichmentRunId);
+      if (!enrichmentRun || enrichmentRun.teamId !== teamId) {
+        return res.status(404).json({ message: "Enrichment run not found" });
+      }
+
+      // Delete classifications and relationships
+      await storage.deleteClassificationsByEnrichmentRun(enrichmentRunId);
+      await storage.deleteRelationshipsByEnrichmentRun(enrichmentRunId);
+
+      // Mark enrichment run as failed/deleted
+      await storage.updateEnrichmentRunStatus(enrichmentRunId, "failed");
+
+      res.json({ message: "Enrichment run deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting enrichment run:", error);
+      res.status(500).json({ message: "Failed to delete enrichment run" });
     }
   });
 

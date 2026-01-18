@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,9 +46,18 @@ import {
   Trash2,
   BookOpen,
   Calendar,
+  Check,
+  Loader2,
+  AlertCircle,
+  FolderOpen,
+  FileText,
+  Upload,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
+import { useAutosave, type SaveStatus } from "@/hooks/use-autosave";
+import { MentionedInSection } from "@/components/mentioned-in-section";
+import { NuclinoImportDialog } from "@/components/nuclino-import-dialog";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Note, NoteType, Team, QuestStatus } from "@shared/schema";
 import { NOTE_TYPES, QUEST_STATUSES, QUEST_STATUS_LABELS, QUEST_STATUS_COLORS } from "@shared/schema";
@@ -75,6 +84,11 @@ const NOTE_TYPE_ICONS: Record<NoteType, typeof MapPin> = {
   poi: MapPin,
   quest: ScrollText,
   session_log: BookOpen,
+  // PRD-015: Import types
+  person: User,
+  place: MapPin,
+  collection: FolderOpen,
+  note: FileText,
 };
 
 const NOTE_TYPE_COLORS: Record<NoteType, string> = {
@@ -84,6 +98,11 @@ const NOTE_TYPE_COLORS: Record<NoteType, string> = {
   poi: "bg-purple-500/10 text-purple-500",
   quest: "bg-red-500/10 text-red-500",
   session_log: "bg-amber-500/10 text-amber-500",
+  // PRD-015: Import types
+  person: "bg-cyan-500/10 text-cyan-500",
+  place: "bg-teal-500/10 text-teal-500",
+  collection: "bg-indigo-500/10 text-indigo-500",
+  note: "bg-gray-500/10 text-gray-500",
 };
 
 const NOTE_TYPE_LABELS: Record<NoteType, string> = {
@@ -93,6 +112,11 @@ const NOTE_TYPE_LABELS: Record<NoteType, string> = {
   poi: "Point of Interest",
   quest: "Quest",
   session_log: "Session",
+  // PRD-015: Import types
+  person: "Person",
+  place: "Place",
+  collection: "Collection",
+  note: "Note",
 };
 
 export default function NotesPage({ team }: NotesPageProps) {
@@ -107,6 +131,7 @@ export default function NotesPage({ team }: NotesPageProps) {
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | null>(null);
+  const [isImportOpen, setIsImportOpen] = useState(false);
 
   // Default form data for creating new sessions
   const getDefaultFormData = () => ({
@@ -190,6 +215,26 @@ export default function NotesPage({ team }: NotesPageProps) {
     },
   });
 
+  // Autosave function for session logs
+  const handleAutosave = useCallback(async (data: typeof formData) => {
+    if (!selectedNote) return;
+    const apiData = {
+      ...data,
+      sessionDate: data.sessionDate ? new Date(data.sessionDate).toISOString() : undefined,
+    };
+    await apiRequest("PATCH", `/api/teams/${team.id}/notes/${selectedNote.id}`, apiData);
+    queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "notes"] });
+  }, [selectedNote, team.id]);
+
+  // Autosave hook - enabled only when editing a session log
+  const { status: autosaveStatus, lastSavedAt } = useAutosave({
+    data: formData,
+    onSave: handleAutosave,
+    debounceMs: 2000,  // 2 second idle debounce
+    maxWaitMs: 15000,  // 15 second hard limit
+    enabled: !!selectedNote && formData.noteType === "session_log",
+  });
+
   const resetForm = () => {
     setFormData(getDefaultFormData());
   };
@@ -242,16 +287,25 @@ export default function NotesPage({ team }: NotesPageProps) {
             Record and review your session notes
           </p>
         </div>
-        <Button
-          onClick={() => {
-            resetForm(); // Reset to defaults (today's date, session_log type)
-            setIsCreateOpen(true);
-          }}
-          data-testid="button-create-note"
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          New Session
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setIsImportOpen(true)}
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            Import
+          </Button>
+          <Button
+            onClick={() => {
+              resetForm(); // Reset to defaults (today's date, session_log type)
+              setIsCreateOpen(true);
+            }}
+            data-testid="button-create-note"
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            New Session
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-col sm:flex-row gap-4 mb-6">
@@ -516,30 +570,84 @@ export default function NotesPage({ team }: NotesPageProps) {
                 data-testid="switch-private"
               />
             </div>
+            {/* Show "Mentioned In" section for entity notes (not session logs) */}
+            {selectedNote && formData.noteType !== "session_log" && (
+              <MentionedInSection
+                teamId={team.id}
+                noteId={selectedNote.id}
+                onNavigateToNote={(noteId) => {
+                  setSelectedNote(null);
+                  // Navigate to session review for the source note
+                  navigate(`/session-review/${noteId}`);
+                }}
+              />
+            )}
           </div>
-          <DialogFooter>
-            <Button 
-              variant="outline" 
-              onClick={() => {
-                setIsCreateOpen(false);
-                setSelectedNote(null);
-                resetForm();
-              }}
-              data-testid="button-cancel"
-            >
-              Cancel
-            </Button>
-            <Button 
-              onClick={handleSubmit}
-              disabled={!formData.title.trim() || createNoteMutation.isPending || updateNoteMutation.isPending}
-              data-testid="button-save-note"
-            >
-              {createNoteMutation.isPending || updateNoteMutation.isPending 
-                ? "Saving..." 
-                : selectedNote 
-                ? "Update" 
-                : "Create"}
-            </Button>
+          <DialogFooter className="flex items-center justify-between sm:justify-between">
+            {/* Autosave status indicator for session logs */}
+            {selectedNote && formData.noteType === "session_log" ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground" data-testid="autosave-status">
+                {autosaveStatus === "pending" && (
+                  <>
+                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                    <span>Unsaved changes</span>
+                  </>
+                )}
+                {autosaveStatus === "saving" && (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Saving...</span>
+                  </>
+                )}
+                {autosaveStatus === "saved" && (
+                  <>
+                    <Check className="h-4 w-4 text-green-500" />
+                    <span>Saved</span>
+                  </>
+                )}
+                {autosaveStatus === "error" && (
+                  <>
+                    <AlertCircle className="h-4 w-4 text-destructive" />
+                    <span>Failed to save</span>
+                  </>
+                )}
+                {autosaveStatus === "idle" && lastSavedAt && (
+                  <>
+                    <Check className="h-4 w-4 text-muted-foreground" />
+                    <span>Saved</span>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div /> // Spacer for flex alignment
+            )}
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsCreateOpen(false);
+                  setSelectedNote(null);
+                  resetForm();
+                }}
+                data-testid="button-cancel"
+              >
+                {selectedNote && formData.noteType === "session_log" ? "Close" : "Cancel"}
+              </Button>
+              {/* Hide manual save button for session logs being edited (autosave handles it) */}
+              {!(selectedNote && formData.noteType === "session_log") && (
+                <Button
+                  onClick={handleSubmit}
+                  disabled={!formData.title.trim() || createNoteMutation.isPending || updateNoteMutation.isPending}
+                  data-testid="button-save-note"
+                >
+                  {createNoteMutation.isPending || updateNoteMutation.isPending
+                    ? "Saving..."
+                    : selectedNote
+                    ? "Update"
+                    : "Create"}
+                </Button>
+              )}
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -564,6 +672,13 @@ export default function NotesPage({ team }: NotesPageProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* PRD-015: Nuclino Import Dialog */}
+      <NuclinoImportDialog
+        teamId={team.id}
+        open={isImportOpen}
+        onOpenChange={setIsImportOpen}
+      />
     </div>
   );
 }

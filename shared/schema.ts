@@ -1,5 +1,5 @@
 import { sql, relations } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, json } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, json, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -134,12 +134,38 @@ export const invites = pgTable("invites", {
 });
 
 // Notes table
-export const NOTE_TYPES = ["location", "character", "npc", "poi", "quest", "session_log"] as const;
+// Original types + import types (person, place, collection, note)
+export const NOTE_TYPES = ["location", "character", "npc", "poi", "quest", "session_log", "person", "place", "collection", "note"] as const;
 export type NoteType = typeof NOTE_TYPES[number];
 
 // Quest status enum (PRD-004)
 export const QUEST_STATUSES = ["lead", "todo", "active", "done", "abandoned"] as const;
 export type QuestStatus = typeof QUEST_STATUSES[number];
+
+// Import run status (PRD-015A)
+export const IMPORT_RUN_STATUSES = ["completed", "failed", "deleted"] as const;
+export type ImportRunStatus = typeof IMPORT_RUN_STATUSES[number];
+
+// Import visibility options (PRD-015A)
+export const IMPORT_VISIBILITIES = ["private", "team"] as const;
+export type ImportVisibility = typeof IMPORT_VISIBILITIES[number];
+
+// Import run options stored as JSON (PRD-015A)
+export interface ImportRunOptions {
+  importEmptyPages: boolean;
+  defaultVisibility: ImportVisibility;
+}
+
+// Import run stats stored as JSON (PRD-015A)
+export interface ImportRunStats {
+  totalPagesDetected: number;
+  notesCreated: number;
+  notesUpdated: number;
+  notesSkipped: number;
+  emptyPagesImported: number;
+  linksResolved: number;
+  warningsCount: number;
+}
 
 export const QUEST_STATUS_LABELS: Record<QuestStatus, string> = {
   lead: "Lead",
@@ -180,6 +206,15 @@ export const notes = pgTable("notes", {
   contentBlocks: json("content_blocks").$type<ContentBlock[]>(),
   // PRD-004: Quest status field
   questStatus: text("quest_status").$type<QuestStatus>(),
+  // PRD-015: Import tracking fields
+  sourceSystem: text("source_system"), // e.g., "NUCLINO"
+  sourcePageId: text("source_page_id"), // e.g., 8-char hex ID from Nuclino filename
+  contentMarkdown: text("content_markdown"), // Original raw markdown
+  contentMarkdownResolved: text("content_markdown_resolved"), // Markdown with resolved links
+  // PRD-015A: Attribution and import run tracking
+  importRunId: varchar("import_run_id"), // Links to import_runs.id
+  createdByUserId: varchar("created_by_user_id"), // User who created this note
+  updatedByUserId: varchar("updated_by_user_id"), // User who last updated this note
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -255,6 +290,103 @@ export const sessionOverrides = pgTable("session_overrides", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// Import Runs table (PRD-015A) - Track import operations for attribution and rollback
+export const importRuns = pgTable("import_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teamId: varchar("team_id").notNull(),
+  sourceSystem: text("source_system").notNull(), // e.g., "NUCLINO"
+  createdByUserId: varchar("created_by_user_id").notNull(),
+  status: text("status").notNull().$type<ImportRunStatus>().default("completed"),
+  options: json("options").$type<ImportRunOptions>(),
+  stats: json("stats").$type<ImportRunStats>(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Note Import Snapshots table (PRD-015A FR-6) - Store previous state for rollback of updated notes
+export const noteImportSnapshots = pgTable("note_import_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  noteId: varchar("note_id").notNull(),
+  importRunId: varchar("import_run_id").notNull(),
+  previousTitle: text("previous_title").notNull(),
+  previousContent: text("previous_content"),
+  previousNoteType: text("previous_note_type").notNull().$type<NoteType>(),
+  previousQuestStatus: text("previous_quest_status").$type<QuestStatus>(),
+  previousContentMarkdown: text("previous_content_markdown"),
+  previousContentMarkdownResolved: text("previous_content_markdown_resolved"),
+  previousIsPrivate: boolean("previous_is_private"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// PRD-016: AI Enrichment types
+export const ENRICHMENT_STATUSES = ["pending", "running", "completed", "failed"] as const;
+export type EnrichmentStatus = typeof ENRICHMENT_STATUSES[number];
+
+export const INFERRED_ENTITY_TYPES = ["Person", "Place", "Quest", "SessionLog", "Note"] as const;
+export type InferredEntityType = typeof INFERRED_ENTITY_TYPES[number];
+
+export const CLASSIFICATION_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ClassificationStatus = typeof CLASSIFICATION_STATUSES[number];
+
+export const RELATIONSHIP_TYPES = ["QuestHasNPC", "QuestAtPlace", "NPCInPlace", "Related"] as const;
+export type RelationshipType = typeof RELATIONSHIP_TYPES[number];
+
+export const EVIDENCE_TYPES = ["Link", "Mention", "Heuristic"] as const;
+export type EvidenceType = typeof EVIDENCE_TYPES[number];
+
+export interface EnrichmentRunTotals {
+  notesProcessed: number;
+  classificationsCreated: number;
+  relationshipsFound: number;
+  highConfidenceCount: number;
+  lowConfidenceCount: number;
+  userReviewRequired: number;
+}
+
+// PRD-016: Enrichment Runs table - Track AI processing pipeline
+export const enrichmentRuns = pgTable("enrichment_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  importRunId: varchar("import_run_id").notNull(),
+  teamId: varchar("team_id").notNull(),
+  createdByUserId: varchar("created_by_user_id").notNull(),
+  status: text("status").notNull().$type<EnrichmentStatus>().default("pending"),
+  totals: json("totals").$type<EnrichmentRunTotals>(),
+  errorMessage: text("error_message"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// PRD-016: Note Classifications table - AI-inferred entity classifications
+export const noteClassifications = pgTable("note_classifications", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  noteId: varchar("note_id").notNull(),
+  enrichmentRunId: varchar("enrichment_run_id").notNull(),
+  inferredType: text("inferred_type").notNull().$type<InferredEntityType>(),
+  confidence: real("confidence").notNull(), // 0.0-1.0
+  explanation: text("explanation"),
+  extractedEntities: json("extracted_entities").$type<string[]>(),
+  status: text("status").notNull().$type<ClassificationStatus>().default("pending"),
+  approvedByUserId: varchar("approved_by_user_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// PRD-016: Note Relationships table - Detected relationships between notes
+export const noteRelationships = pgTable("note_relationships", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  enrichmentRunId: varchar("enrichment_run_id").notNull(),
+  fromNoteId: varchar("from_note_id").notNull(),
+  toNoteId: varchar("to_note_id").notNull(),
+  relationshipType: text("relationship_type").notNull().$type<RelationshipType>(),
+  confidence: real("confidence").notNull(), // 0.0-1.0
+  evidenceSnippet: text("evidence_snippet"),
+  evidenceType: text("evidence_type").notNull().$type<EvidenceType>(),
+  status: text("status").notNull().$type<ClassificationStatus>().default("pending"),
+  approvedByUserId: varchar("approved_by_user_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 // Relations
 export const teamsRelations = relations(teams, ({ many }) => ({
   members: many(teamMembers),
@@ -303,6 +435,34 @@ export const sessionOverridesRelations = relations(sessionOverrides, ({ one }) =
   team: one(teams, { fields: [sessionOverrides.teamId], references: [teams.id] }),
 }));
 
+export const importRunsRelations = relations(importRuns, ({ one, many }) => ({
+  team: one(teams, { fields: [importRuns.teamId], references: [teams.id] }),
+}));
+
+export const noteImportSnapshotsRelations = relations(noteImportSnapshots, ({ one }) => ({
+  note: one(notes, { fields: [noteImportSnapshots.noteId], references: [notes.id] }),
+  importRun: one(importRuns, { fields: [noteImportSnapshots.importRunId], references: [importRuns.id] }),
+}));
+
+// PRD-016: Enrichment relations
+export const enrichmentRunsRelations = relations(enrichmentRuns, ({ one, many }) => ({
+  importRun: one(importRuns, { fields: [enrichmentRuns.importRunId], references: [importRuns.id] }),
+  team: one(teams, { fields: [enrichmentRuns.teamId], references: [teams.id] }),
+  classifications: many(noteClassifications),
+  relationships: many(noteRelationships),
+}));
+
+export const noteClassificationsRelations = relations(noteClassifications, ({ one }) => ({
+  note: one(notes, { fields: [noteClassifications.noteId], references: [notes.id] }),
+  enrichmentRun: one(enrichmentRuns, { fields: [noteClassifications.enrichmentRunId], references: [enrichmentRuns.id] }),
+}));
+
+export const noteRelationshipsRelations = relations(noteRelationships, ({ one }) => ({
+  fromNote: one(notes, { fields: [noteRelationships.fromNoteId], references: [notes.id] }),
+  toNote: one(notes, { fields: [noteRelationships.toNoteId], references: [notes.id] }),
+  enrichmentRun: one(enrichmentRuns, { fields: [noteRelationships.enrichmentRunId], references: [enrichmentRuns.id] }),
+}));
+
 // Insert schemas
 export const insertTeamSchema = createInsertSchema(teams).omit({ id: true, createdAt: true });
 export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({ id: true, joinedAt: true });
@@ -314,6 +474,12 @@ export const insertDiceRollSchema = createInsertSchema(diceRolls).omit({ id: tru
 export const insertBacklinkSchema = createInsertSchema(backlinks).omit({ id: true, createdAt: true });
 export const insertUserAvailabilitySchema = createInsertSchema(userAvailability).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertSessionOverrideSchema = createInsertSchema(sessionOverrides).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertImportRunSchema = createInsertSchema(importRuns).omit({ id: true, createdAt: true });
+export const insertNoteImportSnapshotSchema = createInsertSchema(noteImportSnapshots).omit({ id: true, createdAt: true });
+// PRD-016: Enrichment insert schemas
+export const insertEnrichmentRunSchema = createInsertSchema(enrichmentRuns).omit({ id: true, createdAt: true });
+export const insertNoteClassificationSchema = createInsertSchema(noteClassifications).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertNoteRelationshipSchema = createInsertSchema(noteRelationships).omit({ id: true, createdAt: true, updatedAt: true });
 
 // Types
 export type Team = typeof teams.$inferSelect;
@@ -336,3 +502,14 @@ export type UserAvailability = typeof userAvailability.$inferSelect;
 export type InsertUserAvailability = z.infer<typeof insertUserAvailabilitySchema>;
 export type SessionOverride = typeof sessionOverrides.$inferSelect;
 export type InsertSessionOverride = z.infer<typeof insertSessionOverrideSchema>;
+export type ImportRun = typeof importRuns.$inferSelect;
+export type InsertImportRun = z.infer<typeof insertImportRunSchema>;
+export type NoteImportSnapshot = typeof noteImportSnapshots.$inferSelect;
+export type InsertNoteImportSnapshot = z.infer<typeof insertNoteImportSnapshotSchema>;
+// PRD-016: Enrichment types
+export type EnrichmentRun = typeof enrichmentRuns.$inferSelect;
+export type InsertEnrichmentRun = z.infer<typeof insertEnrichmentRunSchema>;
+export type NoteClassification = typeof noteClassifications.$inferSelect;
+export type InsertNoteClassification = z.infer<typeof insertNoteClassificationSchema>;
+export type NoteRelationship = typeof noteRelationships.$inferSelect;
+export type InsertNoteRelationship = z.infer<typeof insertNoteRelationshipSchema>;

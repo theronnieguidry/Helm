@@ -24,6 +24,11 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
+import {
   Calendar,
   Clock,
   Users,
@@ -33,7 +38,8 @@ import {
   Check,
   X,
   HelpCircle,
-  Globe
+  Globe,
+  Info
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
@@ -44,6 +50,9 @@ import type { SessionCandidate, AvailabilityType } from "@shared/recurrence";
 import { classifyAvailability, getSessionEndTime, formatDateKey } from "@shared/recurrence";
 import { getTimezoneAbbreviation } from "@/components/timezone-select";
 import AvailabilityPanel from "@/components/availability-panel";
+import TeamAvailabilityList, { formatTimeWindow, type MemberAvailability } from "@/components/team-availability-list";
+import SessionStatusControl from "@/components/session-status-control";
+import { Separator } from "@/components/ui/separator";
 
 interface SchedulePageProps {
   team: Team;
@@ -102,6 +111,7 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     notes: "",
   });
   const [selectedAvailabilityDate, setSelectedAvailabilityDate] = useState<Date | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<SessionCandidate | null>(null);
 
   // PRD-010A: Fetch session candidates from recurrence instead of manually created sessions
   const candidatesStartDate = new Date();
@@ -218,13 +228,13 @@ export default function SchedulePage({ team }: SchedulePageProps) {
   const monthEnd = endOfMonth(currentMonth);
   const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
 
-  // User availability query (PRD-009)
+  // User availability query (PRD-009, PRD-012: fetch 2 months ahead to match session candidates)
   const { data: userAvailability } = useQuery<UserAvailability[]>({
-    queryKey: ["/api/teams", team.id, "user-availability", format(monthStart, "yyyy-MM")],
+    queryKey: ["/api/teams", team.id, "user-availability", format(candidatesStartDate, "yyyy-MM")],
     queryFn: async () => {
       const res = await apiRequest(
         "GET",
-        `/api/teams/${team.id}/user-availability?startDate=${monthStart.toISOString()}&endDate=${monthEnd.toISOString()}`
+        `/api/teams/${team.id}/user-availability?startDate=${candidatesStartDate.toISOString()}&endDate=${candidatesEndDate.toISOString()}`
       );
       return res.json();
     },
@@ -368,6 +378,116 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     );
   };
 
+  // Get member availability for a session candidate (for the session availability modal)
+  const getSessionMemberAvailability = (candidate: SessionCandidate): MemberAvailability[] => {
+    if (!members) return [];
+
+    const sessionStart = new Date(candidate.scheduledAt);
+    const sessionEnd = new Date(candidate.endsAt);
+    const sessionStartTime = format(sessionStart, "HH:mm");
+    const sessionEndTime = format(sessionEnd, "HH:mm");
+    const tzAbbr = getTimezoneAbbreviation(userTimezone);
+
+    return members.map((member) => {
+      const displayName = `${member.user?.firstName || ""} ${member.user?.lastName || ""}`.trim() || "Unknown";
+      const ua = userAvailability?.find(
+        (a) => a.userId === member.userId && isSameDay(new Date(a.date), sessionStart)
+      );
+
+      if (!ua) {
+        return {
+          userId: member.userId,
+          displayName,
+          profileImageUrl: member.user?.profileImageUrl,
+          status: "no_response" as const,
+          isDM: member.role === "dm",
+        };
+      }
+
+      const classification = classifyAvailability(
+        ua.startTime,
+        ua.endTime,
+        sessionStartTime,
+        sessionEndTime
+      );
+
+      return {
+        userId: member.userId,
+        displayName,
+        profileImageUrl: member.user?.profileImageUrl,
+        status: classification === "none" ? "no_response" as const : classification,
+        timeWindow:
+          classification !== "none"
+            ? formatTimeWindow(ua.startTime, ua.endTime, tzAbbr)
+            : undefined,
+        isDM: member.role === "dm",
+      };
+    });
+  };
+
+  // Get member availability for a calendar date (for the calendar day hover)
+  const getDayMemberAvailability = (day: Date): MemberAvailability[] => {
+    if (!members) return [];
+
+    const tzAbbr = getTimezoneAbbreviation(userTimezone);
+
+    return members.map((member) => {
+      const displayName = `${member.user?.firstName || ""} ${member.user?.lastName || ""}`.trim() || "Unknown";
+      const ua = userAvailability?.find(
+        (a) => a.userId === member.userId && isSameDay(new Date(a.date), day)
+      );
+
+      return {
+        userId: member.userId,
+        displayName,
+        profileImageUrl: member.user?.profileImageUrl,
+        status: ua ? "full" as const : "no_response" as const,
+        timeWindow: ua ? formatTimeWindow(ua.startTime, ua.endTime, tzAbbr) : undefined,
+        isDM: member.role === "dm",
+      };
+    });
+  };
+
+  // PRD-013: Get session candidate for a specific day (recurrence-based)
+  const getCandidateForDay = (day: Date): SessionCandidate | undefined => {
+    return candidatesData?.candidates?.find(c =>
+      isSameDay(new Date(c.scheduledAt), day)
+    );
+  };
+
+  // PRD-013: Get manual session for a specific day
+  const getManualSessionForDay = (day: Date): GameSession | undefined => {
+    return sessions?.find(s =>
+      isSameDay(new Date(s.scheduledAt), day) && s.isOverride
+    );
+  };
+
+  // PRD-013: Handle session status toggle from calendar popover
+  const handleToggleSessionStatus = (params: {
+    type: "override" | "manual";
+    occurrenceKey?: string;
+    sessionId?: string;
+    newStatus: "scheduled" | "canceled";
+  }) => {
+    if (params.type === "override" && params.occurrenceKey) {
+      updateSessionOverrideMutation.mutate({
+        occurrenceKey: params.occurrenceKey,
+        status: params.newStatus,
+      });
+    } else if (params.type === "manual" && params.sessionId) {
+      updateSessionStatusMutation.mutate({
+        sessionId: params.sessionId,
+        status: params.newStatus,
+      });
+    }
+  };
+
+  // PRD-014: Check if any team member has availability for a given day
+  const hasTeamAvailabilityForDay = (day: Date): boolean => {
+    if (!userAvailability) return false;
+    return userAvailability.some(ua => isSameDay(new Date(ua.date), day));
+  };
+
   // PRD-010B: Filter and compute upcoming session candidates
   // - DM sees all sessions (scheduled AND canceled) when they have availability
   // - Members only see scheduled sessions that meet threshold
@@ -471,6 +591,10 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                   const hasSession = daySessions.length > 0;
                   const dayUserAvailability = getUserAvailabilityForDay(day);
                   const isSelected = selectedAvailabilityDate && isSameDay(day, selectedAvailabilityDate);
+                  // PRD-013: Get recurrence candidate for the day
+                  const dayCandidate = getCandidateForDay(day);
+                  const hasCandidateSession = !!dayCandidate;
+                  const isCandidateCanceled = dayCandidate?.status === "canceled";
                   return (
                     <Popover
                       key={day.toISOString()}
@@ -497,13 +621,56 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                             }`}>
                               {format(day, "d")}
                             </div>
-                            {dayUserAvailability && (
-                              <div
-                                className="w-2 h-2 rounded-full bg-primary"
-                                title="You have availability set"
-                              />
-                            )}
+                            <div className="flex items-center gap-1">
+                              {dayUserAvailability && (
+                                <div
+                                  className="w-2 h-2 rounded-full bg-primary"
+                                  title="You have availability set"
+                                />
+                              )}
+                              {/* PRD-014: Only show info icon when team has availability */}
+                              {hasTeamAvailabilityForDay(day) && (
+                                <HoverCard openDelay={200}>
+                                  <HoverCardTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="p-0.5 rounded hover:bg-muted/50 transition-colors"
+                                      onClick={(e) => e.stopPropagation()}
+                                      aria-label={`View team availability for ${format(day, "MMMM d")}`}
+                                    >
+                                      <Info className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+                                    </button>
+                                  </HoverCardTrigger>
+                                  <HoverCardContent align="start" className="w-72">
+                                    <h4 className="font-medium mb-1">{format(day, "EEEE, MMM d")}</h4>
+                                    <p className="text-xs text-muted-foreground mb-3">Team availability for this date</p>
+                                    <TeamAvailabilityList
+                                      members={getDayMemberAvailability(day)}
+                                      compact
+                                    />
+                                  </HoverCardContent>
+                                </HoverCard>
+                              )}
+                            </div>
                           </div>
+                          {/* PRD-013: Show recurrence session indicator */}
+                          {hasCandidateSession && (
+                            <div className="mt-1">
+                              <div
+                                className={cn(
+                                  "w-full text-xs p-1 rounded font-medium truncate",
+                                  isCandidateCanceled
+                                    ? "bg-red-500/10 text-red-500/70 line-through"
+                                    : "bg-primary/10 text-primary"
+                                )}
+                                data-testid={`candidate-marker-${dayCandidate.occurrenceKey}`}
+                              >
+                                {formatTimeInUserTimezone(new Date(dayCandidate.scheduledAt), userTimezone)}
+                                {isCandidateCanceled && " (canceled)"}
+                              </div>
+                            </div>
+                          )}
+                          {/* Manual sessions (one-off) */}
                           {hasSession && (
                             <div className="space-y-1 mt-1">
                               {daySessions.map(session => (
@@ -524,6 +691,22 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                         </div>
                       </PopoverTrigger>
                       <PopoverContent className="w-80" align="start">
+                        {/* PRD-013: Session status control for DMs */}
+                        {isDM && (getCandidateForDay(day) || getManualSessionForDay(day)) && (
+                          <>
+                            <SessionStatusControl
+                              candidate={getCandidateForDay(day)}
+                              session={getManualSessionForDay(day)}
+                              userTimezone={userTimezone}
+                              onToggle={handleToggleSessionStatus}
+                              isPending={
+                                updateSessionOverrideMutation.isPending ||
+                                updateSessionStatusMutation.isPending
+                              }
+                            />
+                            <Separator className="my-4" />
+                          </>
+                        )}
                         <AvailabilityPanel
                           team={team}
                           selectedDate={day}
@@ -571,13 +754,15 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                     const isCanceled = candidate.status === "canceled";
 
                     return (
-                      <div
+                      <button
                         key={candidate.occurrenceKey}
+                        type="button"
+                        onClick={() => setSelectedCandidate(candidate)}
                         className={cn(
-                          "w-full p-3 rounded-md transition-all",
+                          "w-full p-3 rounded-md transition-all text-left cursor-pointer",
                           isCanceled
                             ? "bg-muted/30 opacity-60"
-                            : "bg-muted/50 hover-elevate"
+                            : "bg-muted/50 hover-elevate hover:bg-muted/70"
                         )}
                         data-testid={`upcoming-candidate-${candidate.occurrenceKey}`}
                       >
@@ -613,7 +798,10 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                             )}
                             {/* PRD-010B: DM Session Status Toggle */}
                             {isDM && (
-                              <div className="flex items-center gap-2">
+                              <div
+                                className="flex items-center gap-2"
+                                onClick={(e) => e.stopPropagation()}
+                              >
                                 <Switch
                                   checked={candidate.status === "scheduled"}
                                   onCheckedChange={(checked) => {
@@ -642,7 +830,7 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                             className="h-1.5"
                           />
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -840,6 +1028,35 @@ export default function SchedulePage({ team }: SchedulePageProps) {
               {createSessionMutation.isPending ? "Creating..." : "Create Session"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Session Candidate Availability Modal */}
+      <Dialog open={!!selectedCandidate} onOpenChange={(open) => !open && setSelectedCandidate(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedCandidate && formatDateTimeInUserTimezone(new Date(selectedCandidate.scheduledAt), userTimezone, "EEEE, MMMM d")}
+            </DialogTitle>
+            <DialogDescription>
+              {selectedCandidate && (
+                <>
+                  {formatTimeInUserTimezone(new Date(selectedCandidate.scheduledAt), userTimezone)}
+                  {" - "}
+                  {formatTimeInUserTimezone(new Date(selectedCandidate.endsAt), userTimezone)}
+                  {" "}
+                  {getTimezoneAbbreviation(userTimezone)}
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          {selectedCandidate && (
+            <div className="py-4">
+              <TeamAvailabilityList
+                members={getSessionMemberAvailability(selectedCandidate)}
+              />
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

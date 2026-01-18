@@ -39,18 +39,20 @@ import {
   Check,
   X,
   Sparkles,
+  Loader2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useEntityDetection } from "@/hooks/use-entity-detection";
+import { SelectableContent } from "@/components/selectable-content";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Note, NoteType, Team } from "@shared/schema";
 import { NOTE_TYPES } from "@shared/schema";
 import {
-  detectEntities,
-  filterEntitiesByConfidence,
   matchEntitiesToNotes,
   type DetectedEntity,
   type EntityType,
 } from "@shared/entity-detection";
+import { findProximitySuggestions, type ProximitySuggestion } from "@shared/proximity-suggestions";
 
 interface SessionReviewPageProps {
   team: Team;
@@ -98,6 +100,9 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
   const [dismissedEntities, setDismissedEntities] = useState<Set<string>>(
     new Set()
   );
+  const [selectedAssociations, setSelectedAssociations] = useState<Set<string>>(
+    new Set()
+  );
 
   // Fetch the session log
   const { data: sessionLog, isLoading: isLoadingSession } = useQuery<Note>({
@@ -113,7 +118,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
 
   // Create note mutation
   const createNoteMutation = useMutation({
-    mutationFn: async (data: typeof createFormData) => {
+    mutationFn: async (data: typeof createFormData & { linkedNoteIds?: string[] }) => {
       const response = await apiRequest(
         "POST",
         `/api/teams/${team.id}/notes`,
@@ -175,20 +180,28 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     },
   });
 
-  // Detect entities from session log content
-  const detectedEntities = useMemo(() => {
-    if (!sessionLog) return [];
-
-    const contentToAnalyze = sessionLog.contentBlocks
+  // Prepare content for entity detection
+  const contentToAnalyze = useMemo(() => {
+    if (!sessionLog) return null;
+    return sessionLog.contentBlocks
       ? sessionLog.contentBlocks.map((b) => ({
           id: b.id,
           content: b.content,
         }))
-      : sessionLog.content || "";
-
-    const entities = detectEntities(contentToAnalyze);
-    return filterEntitiesByConfidence(entities, "low");
+      : sessionLog.content || null;
   }, [sessionLog]);
+
+  // Detect entities from session log content using Web Worker
+  const {
+    entities: detectedEntities,
+    isLoading: isDetectingEntities,
+    error: detectionError,
+  } = useEntityDetection({
+    content: contentToAnalyze,
+    minConfidence: "low",
+    debounceMs: 500,
+    enabled: !!sessionLog,
+  });
 
   // Match entities to existing notes
   const entityMatches = useMemo(() => {
@@ -216,6 +229,57 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     return detectedEntities.filter((e) => entityMatches.has(e.id));
   }, [detectedEntities, entityMatches]);
 
+  // Compute proximity suggestions for all entities
+  const proximitySuggestions = useMemo(() => {
+    if (!sessionLog || detectedEntities.length === 0) return new Map<string, ProximitySuggestion>();
+
+    // Build content map for context extraction
+    const contentMap = new Map<string, string>();
+    if (sessionLog.contentBlocks) {
+      sessionLog.contentBlocks.forEach((block) => {
+        contentMap.set(block.id, block.content);
+      });
+    } else if (sessionLog.content) {
+      contentMap.set("default", sessionLog.content);
+    }
+
+    const suggestions = findProximitySuggestions(detectedEntities, contentMap);
+    return new Map(suggestions.map((s) => [s.entityId, s]));
+  }, [sessionLog, detectedEntities]);
+
+  // Get proximity suggestions for the selected entity with existing note matches
+  const selectedEntitySuggestions = useMemo(() => {
+    if (!selectedEntity || !allNotes) return [];
+
+    const suggestion = proximitySuggestions.get(selectedEntity.id);
+    if (!suggestion) return [];
+
+    // Find related entities that match existing notes
+    return suggestion.relatedEntities
+      .map((related) => {
+        const relatedEntity = detectedEntities.find((e) => e.id === related.entityId);
+        if (!relatedEntity) return null;
+
+        const matchingNoteIds = entityMatches.get(related.entityId) || [];
+        const matchingNotes = allNotes.filter((n) => matchingNoteIds.includes(n.id));
+
+        if (matchingNotes.length === 0) return null;
+
+        return {
+          ...related,
+          notes: matchingNotes,
+        };
+      })
+      .filter(Boolean) as Array<{
+        entityId: string;
+        entityText: string;
+        distance: number;
+        confidence: "high" | "medium" | "low";
+        context: string;
+        notes: Note[];
+      }>;
+  }, [selectedEntity, proximitySuggestions, detectedEntities, entityMatches, allNotes]);
+
   const handleCreateEntity = (entity: DetectedEntity) => {
     setSelectedEntity(entity);
     setCreateFormData({
@@ -223,6 +287,20 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
       content: "",
       noteType: ENTITY_TYPE_NOTE_TYPE[entity.type],
     });
+    // Pre-select high confidence associations
+    const suggestion = proximitySuggestions.get(entity.id);
+    if (suggestion) {
+      const highConfidenceIds = suggestion.relatedEntities
+        .filter((r) => r.confidence === "high")
+        .map((r) => {
+          const matchingNoteIds = entityMatches.get(r.entityId) || [];
+          return matchingNoteIds[0]; // Take first matching note
+        })
+        .filter(Boolean);
+      setSelectedAssociations(new Set(highConfidenceIds));
+    } else {
+      setSelectedAssociations(new Set());
+    }
     setIsCreateOpen(true);
   };
 
@@ -235,6 +313,31 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
       textSnippet: entity.mentions[0]?.text || entity.text,
     });
     setSelectedEntity(entity);
+  };
+
+  // Handle creating entity from text selection
+  const handleCreateFromSelection = (text: string, type: EntityType) => {
+    setCreateFormData({
+      title: text,
+      content: "",
+      noteType: ENTITY_TYPE_NOTE_TYPE[type],
+    });
+    setSelectedEntity(null); // Not from detected entity
+    setSelectedAssociations(new Set()); // No proximity suggestions for manual selection
+    setIsCreateOpen(true);
+  };
+
+  // Toggle association selection
+  const toggleAssociation = (noteId: string) => {
+    setSelectedAssociations((prev) => {
+      const next = new Set(prev);
+      if (next.has(noteId)) {
+        next.delete(noteId);
+      } else {
+        next.add(noteId);
+      }
+      return next;
+    });
   };
 
   const handleDismissEntity = (entityId: string) => {
@@ -295,21 +398,23 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 overflow-auto max-h-[500px]">
-              {sessionLog.contentBlocks && sessionLog.contentBlocks.length > 0 ? (
-                sessionLog.contentBlocks.map((block, index) => (
-                  <div key={block.id} className="p-3 bg-muted/50 rounded-lg">
-                    <p className="text-sm whitespace-pre-wrap">{block.content}</p>
+              <SelectableContent onCreateEntity={handleCreateFromSelection}>
+                {sessionLog.contentBlocks && sessionLog.contentBlocks.length > 0 ? (
+                  sessionLog.contentBlocks.map((block, index) => (
+                    <div key={block.id} className="p-3 bg-muted/50 rounded-lg mb-2 last:mb-0">
+                      <p className="text-sm whitespace-pre-wrap select-text">{block.content}</p>
+                    </div>
+                  ))
+                ) : sessionLog.content ? (
+                  <div className="p-3 bg-muted/50 rounded-lg">
+                    <p className="text-sm whitespace-pre-wrap select-text">{sessionLog.content}</p>
                   </div>
-                ))
-              ) : sessionLog.content ? (
-                <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="text-sm whitespace-pre-wrap">{sessionLog.content}</p>
-                </div>
-              ) : (
-                <p className="text-muted-foreground text-sm">
-                  No content in this session log.
-                </p>
-              )}
+                ) : (
+                  <p className="text-muted-foreground text-sm">
+                    No content in this session log.
+                  </p>
+                )}
+              </SelectableContent>
             </CardContent>
           </Card>
         </ResizablePanel>
@@ -319,16 +424,31 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
         <ResizablePanel defaultSize={40} minSize={30}>
           <Card className="h-full">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Sparkles className="h-5 w-5" />
-                Detected Entities
-                {activeEntities.length > 0 && (
-                  <Badge variant="secondary">{activeEntities.length}</Badge>
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="h-5 w-5" />
+                  Detected Entities
+                </CardTitle>
+                {detectedEntities.length > 0 && (
+                  <div className="text-sm text-muted-foreground">
+                    {linkedEntities.size + dismissedEntities.size} / {detectedEntities.length} processed
+                  </div>
                 )}
-              </CardTitle>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4 overflow-auto max-h-[500px]">
-              {activeEntities.length === 0 && matchedEntities.length === 0 ? (
+              {isDetectingEntities ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                  <span className="ml-2 text-sm text-muted-foreground">
+                    Detecting entities...
+                  </span>
+                </div>
+              ) : detectionError ? (
+                <p className="text-destructive text-sm text-center py-8">
+                  Failed to detect entities: {detectionError}
+                </p>
+              ) : activeEntities.length === 0 && matchedEntities.length === 0 ? (
                 <p className="text-muted-foreground text-sm text-center py-8">
                   No entities detected. Add content to your session log to detect
                   potential people, places, and quests.
@@ -449,13 +569,41 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
                     </div>
                   )}
 
-                  {linkedEntities.size > 0 && (
-                    <div className="text-center py-4 border-t">
-                      <p className="text-sm text-muted-foreground">
-                        {linkedEntities.size} entity/entities linked
-                      </p>
-                    </div>
-                  )}
+                  {/* Progress summary */}
+                  <div className="border-t pt-4 space-y-2">
+                    {detectedEntities.length > 0 && (
+                      <>
+                        {/* Progress bar */}
+                        <div className="w-full bg-muted rounded-full h-2">
+                          <div
+                            className="bg-primary h-2 rounded-full transition-all"
+                            style={{
+                              width: `${Math.round(
+                                ((linkedEntities.size + dismissedEntities.size) /
+                                  detectedEntities.length) *
+                                  100
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-xs text-muted-foreground">
+                          <span>{linkedEntities.size} linked</span>
+                          <span>{dismissedEntities.size} dismissed</span>
+                          <span>{activeEntities.length} remaining</span>
+                        </div>
+                        {activeEntities.length === 0 &&
+                          matchedEntities.length === 0 && (
+                            <div className="text-center py-2">
+                              <Check className="h-8 w-8 text-green-500 mx-auto mb-2" />
+                              <p className="text-sm font-medium">Review Complete</p>
+                              <p className="text-xs text-muted-foreground">
+                                All entities have been processed
+                              </p>
+                            </div>
+                          )}
+                      </>
+                    )}
+                  </div>
                 </>
               )}
             </CardContent>
@@ -515,13 +663,52 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
                 rows={3}
               />
             </div>
+            {/* Proximity Suggestions */}
+            {selectedEntitySuggestions.length > 0 && (
+              <div className="space-y-2">
+                <Label>Suggested Associations</Label>
+                <p className="text-xs text-muted-foreground">
+                  Entities mentioned nearby that might be related
+                </p>
+                <div className="space-y-2 max-h-32 overflow-auto">
+                  {selectedEntitySuggestions.map((suggestion) =>
+                    suggestion.notes.map((note) => (
+                      <label
+                        key={note.id}
+                        className="flex items-center gap-2 p-2 rounded border cursor-pointer hover:bg-muted/50"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedAssociations.has(note.id)}
+                          onChange={() => toggleAssociation(note.id)}
+                          className="rounded"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm font-medium truncate block">
+                            {note.title}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {suggestion.confidence} confidence
+                          </span>
+                        </div>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsCreateOpen(false)}>
               Cancel
             </Button>
             <Button
-              onClick={() => createNoteMutation.mutate(createFormData)}
+              onClick={() =>
+                createNoteMutation.mutate({
+                  ...createFormData,
+                  linkedNoteIds: Array.from(selectedAssociations),
+                })
+              }
               disabled={!createFormData.title.trim() || createNoteMutation.isPending}
             >
               {createNoteMutation.isPending ? "Creating..." : "Create & Link"}

@@ -24,7 +24,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { 
+import {
   Settings as SettingsIcon,
   Save,
   Trash2,
@@ -33,8 +33,10 @@ import {
   Clock,
   Users,
   User,
-  Scroll
+  Scroll,
+  Download,
 } from "lucide-react";
+import { ImportManagement } from "@/components/import-management";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -492,6 +494,26 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
         </Card>
 
         {isTabletopGroup && <CharacterCard />}
+
+        {/* PRD-015A: Import History */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Download className="h-5 w-5" />
+              Import History
+            </CardTitle>
+            <CardDescription>
+              Manage imported content from external sources
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ImportManagement
+              teamId={team.id}
+              isDM={isDM}
+              currentUserId={user?.id || ""}
+            />
+          </CardContent>
+        </Card>
 
         <div className="flex items-center justify-between pt-4">
           <Button

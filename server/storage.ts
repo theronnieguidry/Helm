@@ -9,6 +9,12 @@ import {
   backlinks, Backlink, InsertBacklink,
   userAvailability, UserAvailability, InsertUserAvailability,
   sessionOverrides, SessionOverride, InsertSessionOverride,
+  importRuns, ImportRun, InsertImportRun, ImportRunStatus,
+  noteImportSnapshots, NoteImportSnapshot, InsertNoteImportSnapshot,
+  // PRD-016: AI Enrichment
+  enrichmentRuns, EnrichmentRun, InsertEnrichmentRun, EnrichmentStatus,
+  noteClassifications, NoteClassification, InsertNoteClassification, ClassificationStatus,
+  noteRelationships, NoteRelationship, InsertNoteRelationship,
   users
 } from "@shared/schema";
 import { db } from "./db";
@@ -48,6 +54,9 @@ export interface IStorage {
   updateNote(id: string, data: Partial<InsertNote>): Promise<Note>;
   deleteNote(id: string): Promise<void>;
   getSessionLogs(teamId: string): Promise<Note[]>;
+  // PRD-015: Import methods
+  findNoteBySourceId(teamId: string, sourceSystem: string, sourcePageId: string): Promise<Note | undefined>;
+  upsertImportedNote(note: InsertNote): Promise<{ note: Note; created: boolean }>;
 
   // Game Sessions
   getSessions(teamId: string): Promise<GameSession[]>;
@@ -85,6 +94,46 @@ export interface IStorage {
   getSessionOverride(teamId: string, occurrenceKey: string): Promise<SessionOverride | undefined>;
   upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride>;
   deleteSessionOverride(id: string): Promise<void>;
+
+  // Import Runs (PRD-015A)
+  getImportRuns(teamId: string): Promise<ImportRun[]>;
+  getImportRun(id: string): Promise<ImportRun | undefined>;
+  createImportRun(importRun: InsertImportRun): Promise<ImportRun>;
+  updateImportRun(id: string, data: Partial<InsertImportRun>): Promise<ImportRun>;
+  updateImportRunStatus(id: string, status: ImportRunStatus): Promise<ImportRun>;
+
+  // Notes by import run (PRD-015A)
+  getNotesByImportRun(importRunId: string): Promise<Note[]>;
+  deleteNotesByImportRun(importRunId: string): Promise<number>;
+
+  // Note Import Snapshots (PRD-015A FR-6)
+  createNoteImportSnapshot(snapshot: InsertNoteImportSnapshot): Promise<NoteImportSnapshot>;
+  getSnapshotsByImportRun(importRunId: string): Promise<NoteImportSnapshot[]>;
+  restoreNoteFromSnapshot(snapshotId: string): Promise<Note>;
+  deleteSnapshotsByImportRun(importRunId: string): Promise<void>;
+
+  // PRD-016: Enrichment Runs
+  createEnrichmentRun(run: InsertEnrichmentRun): Promise<EnrichmentRun>;
+  getEnrichmentRun(id: string): Promise<EnrichmentRun | undefined>;
+  getEnrichmentRunByImportId(importRunId: string): Promise<EnrichmentRun | undefined>;
+  updateEnrichmentRun(id: string, data: Partial<InsertEnrichmentRun>): Promise<EnrichmentRun>;
+  updateEnrichmentRunStatus(id: string, status: EnrichmentStatus): Promise<EnrichmentRun>;
+
+  // PRD-016: Note Classifications
+  createNoteClassification(classification: InsertNoteClassification): Promise<NoteClassification>;
+  getNoteClassificationsByEnrichmentRun(enrichmentRunId: string): Promise<NoteClassification[]>;
+  getNoteClassification(noteId: string): Promise<NoteClassification | undefined>;
+  updateNoteClassificationStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteClassification>;
+  bulkUpdateClassificationStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number>;
+  deleteClassificationsByEnrichmentRun(enrichmentRunId: string): Promise<void>;
+
+  // PRD-016: Note Relationships
+  createNoteRelationship(relationship: InsertNoteRelationship): Promise<NoteRelationship>;
+  getNoteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<NoteRelationship[]>;
+  getRelationshipsForNote(noteId: string): Promise<NoteRelationship[]>;
+  updateNoteRelationshipStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteRelationship>;
+  bulkUpdateRelationshipStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number>;
+  deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void>;
 }
 
 function generateInviteCode(): string {
@@ -270,6 +319,50 @@ export class DatabaseStorage implements IStorage {
       .from(notes)
       .where(and(eq(notes.teamId, teamId), eq(notes.noteType, "session_log")))
       .orderBy(desc(notes.sessionDate));
+  }
+
+  // PRD-015: Import methods
+  async findNoteBySourceId(teamId: string, sourceSystem: string, sourcePageId: string): Promise<Note | undefined> {
+    const [note] = await db
+      .select()
+      .from(notes)
+      .where(
+        and(
+          eq(notes.teamId, teamId),
+          eq(notes.sourceSystem, sourceSystem),
+          eq(notes.sourcePageId, sourcePageId)
+        )
+      );
+    return note;
+  }
+
+  async upsertImportedNote(note: InsertNote): Promise<{ note: Note; created: boolean }> {
+    // Check if note already exists with same source identifiers
+    if (note.sourceSystem && note.sourcePageId) {
+      const existing = await this.findNoteBySourceId(
+        note.teamId,
+        note.sourceSystem,
+        note.sourcePageId
+      );
+
+      if (existing) {
+        // Update existing note
+        const updated = await this.updateNote(existing.id, {
+          title: note.title,
+          content: note.content,
+          noteType: note.noteType,
+          questStatus: note.questStatus,
+          contentMarkdown: note.contentMarkdown,
+          contentMarkdownResolved: note.contentMarkdownResolved,
+          linkedNoteIds: note.linkedNoteIds,
+        });
+        return { note: updated, created: false };
+      }
+    }
+
+    // Create new note
+    const created = await this.createNote(note);
+    return { note: created, created: true };
   }
 
   // Game Sessions
@@ -490,6 +583,259 @@ export class DatabaseStorage implements IStorage {
 
   async deleteSessionOverride(id: string): Promise<void> {
     await db.delete(sessionOverrides).where(eq(sessionOverrides.id, id));
+  }
+
+  // Import Runs (PRD-015A)
+  async getImportRuns(teamId: string): Promise<ImportRun[]> {
+    return await db
+      .select()
+      .from(importRuns)
+      .where(eq(importRuns.teamId, teamId))
+      .orderBy(desc(importRuns.createdAt));
+  }
+
+  async getImportRun(id: string): Promise<ImportRun | undefined> {
+    const [run] = await db.select().from(importRuns).where(eq(importRuns.id, id));
+    return run;
+  }
+
+  async createImportRun(importRun: InsertImportRun): Promise<ImportRun> {
+    const [created] = await db.insert(importRuns).values(importRun).returning();
+    return created;
+  }
+
+  async updateImportRun(id: string, data: Partial<InsertImportRun>): Promise<ImportRun> {
+    const [updated] = await db
+      .update(importRuns)
+      .set(data as typeof importRuns.$inferInsert)
+      .where(eq(importRuns.id, id))
+      .returning();
+    return updated;
+  }
+
+  async updateImportRunStatus(id: string, status: ImportRunStatus): Promise<ImportRun> {
+    const [updated] = await db
+      .update(importRuns)
+      .set({ status })
+      .where(eq(importRuns.id, id))
+      .returning();
+    return updated;
+  }
+
+  // Notes by import run (PRD-015A)
+  async getNotesByImportRun(importRunId: string): Promise<Note[]> {
+    return await db
+      .select()
+      .from(notes)
+      .where(eq(notes.importRunId, importRunId));
+  }
+
+  async deleteNotesByImportRun(importRunId: string): Promise<number> {
+    // Get all notes to delete their backlinks
+    const notesToDelete = await this.getNotesByImportRun(importRunId);
+
+    for (const note of notesToDelete) {
+      await db.delete(backlinks).where(eq(backlinks.sourceNoteId, note.id));
+      await db.delete(backlinks).where(eq(backlinks.targetNoteId, note.id));
+    }
+
+    const result = await db
+      .delete(notes)
+      .where(eq(notes.importRunId, importRunId))
+      .returning();
+
+    return result.length;
+  }
+
+  // Note Import Snapshots (PRD-015A FR-6)
+  async createNoteImportSnapshot(snapshot: InsertNoteImportSnapshot): Promise<NoteImportSnapshot> {
+    const [created] = await db.insert(noteImportSnapshots).values(snapshot as typeof noteImportSnapshots.$inferInsert).returning();
+    return created;
+  }
+
+  async getSnapshotsByImportRun(importRunId: string): Promise<NoteImportSnapshot[]> {
+    return await db
+      .select()
+      .from(noteImportSnapshots)
+      .where(eq(noteImportSnapshots.importRunId, importRunId));
+  }
+
+  async restoreNoteFromSnapshot(snapshotId: string): Promise<Note> {
+    const [snapshot] = await db
+      .select()
+      .from(noteImportSnapshots)
+      .where(eq(noteImportSnapshots.id, snapshotId));
+
+    if (!snapshot) throw new Error("Snapshot not found");
+
+    const [restored] = await db
+      .update(notes)
+      .set({
+        title: snapshot.previousTitle,
+        content: snapshot.previousContent,
+        noteType: snapshot.previousNoteType,
+        questStatus: snapshot.previousQuestStatus,
+        contentMarkdown: snapshot.previousContentMarkdown,
+        contentMarkdownResolved: snapshot.previousContentMarkdownResolved,
+        isPrivate: snapshot.previousIsPrivate,
+        importRunId: null, // Clear import run reference
+        updatedAt: new Date(),
+      })
+      .where(eq(notes.id, snapshot.noteId))
+      .returning();
+
+    return restored;
+  }
+
+  async deleteSnapshotsByImportRun(importRunId: string): Promise<void> {
+    await db.delete(noteImportSnapshots).where(eq(noteImportSnapshots.importRunId, importRunId));
+  }
+
+  // PRD-016: Enrichment Runs
+  async createEnrichmentRun(run: InsertEnrichmentRun): Promise<EnrichmentRun> {
+    const [created] = await db.insert(enrichmentRuns).values(run as typeof enrichmentRuns.$inferInsert).returning();
+    return created;
+  }
+
+  async getEnrichmentRun(id: string): Promise<EnrichmentRun | undefined> {
+    const [run] = await db.select().from(enrichmentRuns).where(eq(enrichmentRuns.id, id));
+    return run;
+  }
+
+  async getEnrichmentRunByImportId(importRunId: string): Promise<EnrichmentRun | undefined> {
+    const [run] = await db
+      .select()
+      .from(enrichmentRuns)
+      .where(eq(enrichmentRuns.importRunId, importRunId))
+      .orderBy(desc(enrichmentRuns.createdAt))
+      .limit(1);
+    return run;
+  }
+
+  async updateEnrichmentRun(id: string, data: Partial<InsertEnrichmentRun>): Promise<EnrichmentRun> {
+    const [updated] = await db
+      .update(enrichmentRuns)
+      .set(data as typeof enrichmentRuns.$inferInsert)
+      .where(eq(enrichmentRuns.id, id))
+      .returning();
+    return updated;
+  }
+
+  async updateEnrichmentRunStatus(id: string, status: EnrichmentStatus): Promise<EnrichmentRun> {
+    const updates: Partial<typeof enrichmentRuns.$inferInsert> = { status };
+    if (status === "running") {
+      updates.startedAt = new Date();
+    } else if (status === "completed" || status === "failed") {
+      updates.completedAt = new Date();
+    }
+    const [updated] = await db
+      .update(enrichmentRuns)
+      .set(updates)
+      .where(eq(enrichmentRuns.id, id))
+      .returning();
+    return updated;
+  }
+
+  // PRD-016: Note Classifications
+  async createNoteClassification(classification: InsertNoteClassification): Promise<NoteClassification> {
+    const [created] = await db.insert(noteClassifications).values(classification as typeof noteClassifications.$inferInsert).returning();
+    return created;
+  }
+
+  async getNoteClassificationsByEnrichmentRun(enrichmentRunId: string): Promise<NoteClassification[]> {
+    return await db
+      .select()
+      .from(noteClassifications)
+      .where(eq(noteClassifications.enrichmentRunId, enrichmentRunId))
+      .orderBy(desc(noteClassifications.confidence));
+  }
+
+  async getNoteClassification(noteId: string): Promise<NoteClassification | undefined> {
+    const [classification] = await db
+      .select()
+      .from(noteClassifications)
+      .where(eq(noteClassifications.noteId, noteId))
+      .orderBy(desc(noteClassifications.createdAt))
+      .limit(1);
+    return classification;
+  }
+
+  async updateNoteClassificationStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteClassification> {
+    const [updated] = await db
+      .update(noteClassifications)
+      .set({
+        status,
+        approvedByUserId: status === "approved" ? userId : null,
+        updatedAt: new Date(),
+      })
+      .where(eq(noteClassifications.id, id))
+      .returning();
+    return updated;
+  }
+
+  async bulkUpdateClassificationStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number> {
+    let count = 0;
+    for (const id of ids) {
+      await this.updateNoteClassificationStatus(id, status, userId);
+      count++;
+    }
+    return count;
+  }
+
+  async deleteClassificationsByEnrichmentRun(enrichmentRunId: string): Promise<void> {
+    await db.delete(noteClassifications).where(eq(noteClassifications.enrichmentRunId, enrichmentRunId));
+  }
+
+  // PRD-016: Note Relationships
+  async createNoteRelationship(relationship: InsertNoteRelationship): Promise<NoteRelationship> {
+    const [created] = await db.insert(noteRelationships).values(relationship as typeof noteRelationships.$inferInsert).returning();
+    return created;
+  }
+
+  async getNoteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<NoteRelationship[]> {
+    return await db
+      .select()
+      .from(noteRelationships)
+      .where(eq(noteRelationships.enrichmentRunId, enrichmentRunId))
+      .orderBy(desc(noteRelationships.confidence));
+  }
+
+  async getRelationshipsForNote(noteId: string): Promise<NoteRelationship[]> {
+    const fromRelationships = await db
+      .select()
+      .from(noteRelationships)
+      .where(eq(noteRelationships.fromNoteId, noteId));
+    const toRelationships = await db
+      .select()
+      .from(noteRelationships)
+      .where(eq(noteRelationships.toNoteId, noteId));
+    return [...fromRelationships, ...toRelationships];
+  }
+
+  async updateNoteRelationshipStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteRelationship> {
+    const [updated] = await db
+      .update(noteRelationships)
+      .set({
+        status,
+        approvedByUserId: status === "approved" ? userId : null,
+        updatedAt: new Date(),
+      })
+      .where(eq(noteRelationships.id, id))
+      .returning();
+    return updated;
+  }
+
+  async bulkUpdateRelationshipStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number> {
+    let count = 0;
+    for (const id of ids) {
+      await this.updateNoteRelationshipStatus(id, status, userId);
+      count++;
+    }
+    return count;
+  }
+
+  async deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void> {
+    await db.delete(noteRelationships).where(eq(noteRelationships.enrichmentRunId, enrichmentRunId));
   }
 }
 

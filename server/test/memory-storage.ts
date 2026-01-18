@@ -1,6 +1,7 @@
 import type { IStorage } from "../storage";
 import {
-  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS, QUEST_STATUSES, SESSION_STATUSES,
+  TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS, QUEST_STATUSES, SESSION_STATUSES, IMPORT_RUN_STATUSES,
+  ENRICHMENT_STATUSES, CLASSIFICATION_STATUSES, INFERRED_ENTITY_TYPES, RELATIONSHIP_TYPES, EVIDENCE_TYPES,
   type Team, type InsertTeam,
   type TeamMember, type InsertTeamMember,
   type Invite, type InsertInvite,
@@ -11,6 +12,15 @@ import {
   type Backlink, type InsertBacklink,
   type UserAvailability, type InsertUserAvailability,
   type SessionOverride, type InsertSessionOverride,
+  type ImportRun, type InsertImportRun, type ImportRunStatus,
+  type NoteImportSnapshot, type InsertNoteImportSnapshot,
+  type ImportRunOptions, type ImportRunStats,
+  // PRD-016: AI Enrichment types
+  type EnrichmentRun, type InsertEnrichmentRun, type EnrichmentStatus,
+  type NoteClassification, type InsertNoteClassification, type ClassificationStatus,
+  type NoteRelationship, type InsertNoteRelationship,
+  type InferredEntityType, type RelationshipType, type EvidenceType,
+  type EnrichmentRunTotals,
   type User,
   type TeamType,
   type DiceMode,
@@ -78,6 +88,52 @@ function validateSessionStatus(value: string | null | undefined): SessionStatus 
   return value as SessionStatus;
 }
 
+function validateImportRunStatus(value: string | null | undefined): ImportRunStatus {
+  if (value === null || value === undefined) return "completed";
+  if (!IMPORT_RUN_STATUSES.includes(value as ImportRunStatus)) {
+    throw new Error(`Invalid import run status: ${value}`);
+  }
+  return value as ImportRunStatus;
+}
+
+// PRD-016: Validation functions for AI Enrichment
+function validateEnrichmentStatus(value: string | null | undefined): EnrichmentStatus {
+  if (value === null || value === undefined) return "pending";
+  if (!ENRICHMENT_STATUSES.includes(value as EnrichmentStatus)) {
+    throw new Error(`Invalid enrichment status: ${value}`);
+  }
+  return value as EnrichmentStatus;
+}
+
+function validateClassificationStatus(value: string | null | undefined): ClassificationStatus {
+  if (value === null || value === undefined) return "pending";
+  if (!CLASSIFICATION_STATUSES.includes(value as ClassificationStatus)) {
+    throw new Error(`Invalid classification status: ${value}`);
+  }
+  return value as ClassificationStatus;
+}
+
+function validateInferredEntityType(value: string): InferredEntityType {
+  if (!INFERRED_ENTITY_TYPES.includes(value as InferredEntityType)) {
+    throw new Error(`Invalid inferred entity type: ${value}`);
+  }
+  return value as InferredEntityType;
+}
+
+function validateRelationshipType(value: string): RelationshipType {
+  if (!RELATIONSHIP_TYPES.includes(value as RelationshipType)) {
+    throw new Error(`Invalid relationship type: ${value}`);
+  }
+  return value as RelationshipType;
+}
+
+function validateEvidenceType(value: string): EvidenceType {
+  if (!EVIDENCE_TYPES.includes(value as EvidenceType)) {
+    throw new Error(`Invalid evidence type: ${value}`);
+  }
+  return value as EvidenceType;
+}
+
 export class MemoryStorage implements IStorage {
   private users: Map<string, User> = new Map();
   private teams: Map<string, Team> = new Map();
@@ -90,6 +146,12 @@ export class MemoryStorage implements IStorage {
   private backlinks: Map<string, Backlink> = new Map();
   private userAvailabilityMap: Map<string, UserAvailability> = new Map();
   private sessionOverridesMap: Map<string, SessionOverride> = new Map();
+  private importRunsMap: Map<string, ImportRun> = new Map();
+  private noteImportSnapshotsMap: Map<string, NoteImportSnapshot> = new Map();
+  // PRD-016: AI Enrichment
+  private enrichmentRunsMap: Map<string, EnrichmentRun> = new Map();
+  private noteClassificationsMap: Map<string, NoteClassification> = new Map();
+  private noteRelationshipsMap: Map<string, NoteRelationship> = new Map();
 
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
@@ -137,6 +199,7 @@ export class MemoryStorage implements IStorage {
       timezone: team.timezone ?? null,
       recurrenceAnchorDate: null,
       minAttendanceThreshold: 2,
+      defaultSessionDurationMinutes: 180,
       createdAt: new Date(),
     };
     this.teams.set(id, newTeam);
@@ -285,6 +348,15 @@ export class MemoryStorage implements IStorage {
       contentBlocks: (note.contentBlocks as ContentBlock[]) ?? null,
       // PRD-004: Quest status
       questStatus,
+      // PRD-015: Import tracking fields
+      sourceSystem: note.sourceSystem ?? null,
+      sourcePageId: note.sourcePageId ?? null,
+      contentMarkdown: note.contentMarkdown ?? null,
+      contentMarkdownResolved: note.contentMarkdownResolved ?? null,
+      // PRD-015A: Attribution and import run tracking
+      importRunId: note.importRunId ?? null,
+      createdByUserId: note.createdByUserId ?? null,
+      updatedByUserId: note.updatedByUserId ?? null,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -318,6 +390,42 @@ export class MemoryStorage implements IStorage {
         const dateB = b.sessionDate?.getTime() ?? 0;
         return dateB - dateA;
       });
+  }
+
+  // PRD-015: Import methods
+  async findNoteBySourceId(teamId: string, sourceSystem: string, sourcePageId: string): Promise<Note | undefined> {
+    return Array.from(this.notes.values()).find(
+      n => n.teamId === teamId && n.sourceSystem === sourceSystem && n.sourcePageId === sourcePageId
+    );
+  }
+
+  async upsertImportedNote(note: InsertNote): Promise<{ note: Note; created: boolean }> {
+    // Check if note already exists with same source identifiers
+    if (note.sourceSystem && note.sourcePageId) {
+      const existing = await this.findNoteBySourceId(
+        note.teamId,
+        note.sourceSystem,
+        note.sourcePageId
+      );
+
+      if (existing) {
+        // Update existing note
+        const updated = await this.updateNote(existing.id, {
+          title: note.title,
+          content: note.content,
+          noteType: note.noteType,
+          questStatus: note.questStatus,
+          contentMarkdown: note.contentMarkdown,
+          contentMarkdownResolved: note.contentMarkdownResolved,
+          linkedNoteIds: note.linkedNoteIds,
+        });
+        return { note: updated, created: false };
+      }
+    }
+
+    // Create new note
+    const created = await this.createNote(note);
+    return { note: created, created: true };
   }
 
   async getSessions(teamId: string): Promise<GameSession[]> {
@@ -568,6 +676,294 @@ export class MemoryStorage implements IStorage {
     this.sessionOverridesMap.delete(id);
   }
 
+  // Import Runs (PRD-015A)
+  async getImportRuns(teamId: string): Promise<ImportRun[]> {
+    return Array.from(this.importRunsMap.values())
+      .filter(r => r.teamId === teamId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async getImportRun(id: string): Promise<ImportRun | undefined> {
+    return this.importRunsMap.get(id);
+  }
+
+  async createImportRun(importRun: InsertImportRun): Promise<ImportRun> {
+    const id = generateId();
+    const status = validateImportRunStatus(importRun.status);
+    const newRun: ImportRun = {
+      id,
+      teamId: importRun.teamId,
+      sourceSystem: importRun.sourceSystem,
+      createdByUserId: importRun.createdByUserId,
+      status,
+      options: importRun.options as ImportRunOptions ?? null,
+      stats: importRun.stats as ImportRunStats ?? null,
+      createdAt: new Date(),
+    };
+    this.importRunsMap.set(id, newRun);
+    return newRun;
+  }
+
+  async updateImportRun(id: string, data: Partial<InsertImportRun>): Promise<ImportRun> {
+    const run = this.importRunsMap.get(id);
+    if (!run) throw new Error("Import run not found");
+    const updated: ImportRun = { ...run, ...data } as ImportRun;
+    this.importRunsMap.set(id, updated);
+    return updated;
+  }
+
+  async updateImportRunStatus(id: string, status: ImportRunStatus): Promise<ImportRun> {
+    const run = this.importRunsMap.get(id);
+    if (!run) throw new Error("Import run not found");
+    const updated = { ...run, status };
+    this.importRunsMap.set(id, updated);
+    return updated;
+  }
+
+  // Notes by import run (PRD-015A)
+  async getNotesByImportRun(importRunId: string): Promise<Note[]> {
+    return Array.from(this.notes.values())
+      .filter(n => n.importRunId === importRunId);
+  }
+
+  async deleteNotesByImportRun(importRunId: string): Promise<number> {
+    const notesToDelete = await this.getNotesByImportRun(importRunId);
+    for (const note of notesToDelete) {
+      await this.deleteNote(note.id);
+    }
+    return notesToDelete.length;
+  }
+
+  // Note Import Snapshots (PRD-015A FR-6)
+  async createNoteImportSnapshot(snapshot: InsertNoteImportSnapshot): Promise<NoteImportSnapshot> {
+    const id = generateId();
+    const newSnapshot: NoteImportSnapshot = {
+      id,
+      noteId: snapshot.noteId,
+      importRunId: snapshot.importRunId,
+      previousTitle: snapshot.previousTitle,
+      previousContent: snapshot.previousContent ?? null,
+      previousNoteType: snapshot.previousNoteType as NoteType,
+      previousQuestStatus: snapshot.previousQuestStatus as QuestStatus ?? null,
+      previousContentMarkdown: snapshot.previousContentMarkdown ?? null,
+      previousContentMarkdownResolved: snapshot.previousContentMarkdownResolved ?? null,
+      previousIsPrivate: snapshot.previousIsPrivate ?? null,
+      createdAt: new Date(),
+    };
+    this.noteImportSnapshotsMap.set(id, newSnapshot);
+    return newSnapshot;
+  }
+
+  async getSnapshotsByImportRun(importRunId: string): Promise<NoteImportSnapshot[]> {
+    return Array.from(this.noteImportSnapshotsMap.values())
+      .filter(s => s.importRunId === importRunId);
+  }
+
+  async restoreNoteFromSnapshot(snapshotId: string): Promise<Note> {
+    const snapshot = this.noteImportSnapshotsMap.get(snapshotId);
+    if (!snapshot) throw new Error("Snapshot not found");
+
+    return await this.updateNote(snapshot.noteId, {
+      title: snapshot.previousTitle,
+      content: snapshot.previousContent,
+      noteType: snapshot.previousNoteType,
+      questStatus: snapshot.previousQuestStatus,
+      contentMarkdown: snapshot.previousContentMarkdown,
+      contentMarkdownResolved: snapshot.previousContentMarkdownResolved,
+      isPrivate: snapshot.previousIsPrivate,
+      importRunId: null,
+    });
+  }
+
+  async deleteSnapshotsByImportRun(importRunId: string): Promise<void> {
+    for (const [id, snapshot] of Array.from(this.noteImportSnapshotsMap.entries())) {
+      if (snapshot.importRunId === importRunId) {
+        this.noteImportSnapshotsMap.delete(id);
+      }
+    }
+  }
+
+  // PRD-016: Enrichment Runs
+  async createEnrichmentRun(run: InsertEnrichmentRun): Promise<EnrichmentRun> {
+    const id = generateId();
+    const status = validateEnrichmentStatus(run.status);
+    const newRun: EnrichmentRun = {
+      id,
+      importRunId: run.importRunId,
+      teamId: run.teamId,
+      createdByUserId: run.createdByUserId,
+      status,
+      totals: run.totals as EnrichmentRunTotals ?? null,
+      errorMessage: run.errorMessage ?? null,
+      startedAt: run.startedAt ?? null,
+      completedAt: run.completedAt ?? null,
+      createdAt: new Date(),
+    };
+    this.enrichmentRunsMap.set(id, newRun);
+    return newRun;
+  }
+
+  async getEnrichmentRun(id: string): Promise<EnrichmentRun | undefined> {
+    return this.enrichmentRunsMap.get(id);
+  }
+
+  async getEnrichmentRunByImportId(importRunId: string): Promise<EnrichmentRun | undefined> {
+    return Array.from(this.enrichmentRunsMap.values())
+      .filter(r => r.importRunId === importRunId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0))[0];
+  }
+
+  async updateEnrichmentRun(id: string, data: Partial<InsertEnrichmentRun>): Promise<EnrichmentRun> {
+    const run = this.enrichmentRunsMap.get(id);
+    if (!run) throw new Error("Enrichment run not found");
+    const updated: EnrichmentRun = { ...run, ...data } as EnrichmentRun;
+    this.enrichmentRunsMap.set(id, updated);
+    return updated;
+  }
+
+  async updateEnrichmentRunStatus(id: string, status: EnrichmentStatus): Promise<EnrichmentRun> {
+    const run = this.enrichmentRunsMap.get(id);
+    if (!run) throw new Error("Enrichment run not found");
+    const updates: Partial<EnrichmentRun> = { status };
+    if (status === "running") {
+      updates.startedAt = new Date();
+    } else if (status === "completed" || status === "failed") {
+      updates.completedAt = new Date();
+    }
+    const updated = { ...run, ...updates };
+    this.enrichmentRunsMap.set(id, updated);
+    return updated;
+  }
+
+  // PRD-016: Note Classifications
+  async createNoteClassification(classification: InsertNoteClassification): Promise<NoteClassification> {
+    const id = generateId();
+    const status = validateClassificationStatus(classification.status);
+    const inferredType = validateInferredEntityType(classification.inferredType);
+    const newClassification: NoteClassification = {
+      id,
+      noteId: classification.noteId,
+      enrichmentRunId: classification.enrichmentRunId,
+      inferredType,
+      confidence: classification.confidence,
+      explanation: classification.explanation ?? null,
+      extractedEntities: classification.extractedEntities as string[] ?? null,
+      status,
+      approvedByUserId: classification.approvedByUserId ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.noteClassificationsMap.set(id, newClassification);
+    return newClassification;
+  }
+
+  async getNoteClassificationsByEnrichmentRun(enrichmentRunId: string): Promise<NoteClassification[]> {
+    return Array.from(this.noteClassificationsMap.values())
+      .filter(c => c.enrichmentRunId === enrichmentRunId)
+      .sort((a, b) => b.confidence - a.confidence);
+  }
+
+  async getNoteClassification(noteId: string): Promise<NoteClassification | undefined> {
+    return Array.from(this.noteClassificationsMap.values())
+      .filter(c => c.noteId === noteId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0))[0];
+  }
+
+  async updateNoteClassificationStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteClassification> {
+    const classification = this.noteClassificationsMap.get(id);
+    if (!classification) throw new Error("Classification not found");
+    const updated: NoteClassification = {
+      ...classification,
+      status,
+      approvedByUserId: status === "approved" ? userId : null,
+      updatedAt: new Date(),
+    };
+    this.noteClassificationsMap.set(id, updated);
+    return updated;
+  }
+
+  async bulkUpdateClassificationStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number> {
+    let count = 0;
+    for (const id of ids) {
+      await this.updateNoteClassificationStatus(id, status, userId);
+      count++;
+    }
+    return count;
+  }
+
+  async deleteClassificationsByEnrichmentRun(enrichmentRunId: string): Promise<void> {
+    for (const [id, classification] of Array.from(this.noteClassificationsMap.entries())) {
+      if (classification.enrichmentRunId === enrichmentRunId) {
+        this.noteClassificationsMap.delete(id);
+      }
+    }
+  }
+
+  // PRD-016: Note Relationships
+  async createNoteRelationship(relationship: InsertNoteRelationship): Promise<NoteRelationship> {
+    const id = generateId();
+    const status = validateClassificationStatus(relationship.status);
+    const relationshipType = validateRelationshipType(relationship.relationshipType);
+    const evidenceType = validateEvidenceType(relationship.evidenceType);
+    const newRelationship: NoteRelationship = {
+      id,
+      enrichmentRunId: relationship.enrichmentRunId,
+      fromNoteId: relationship.fromNoteId,
+      toNoteId: relationship.toNoteId,
+      relationshipType,
+      confidence: relationship.confidence,
+      evidenceSnippet: relationship.evidenceSnippet ?? null,
+      evidenceType,
+      status,
+      approvedByUserId: relationship.approvedByUserId ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.noteRelationshipsMap.set(id, newRelationship);
+    return newRelationship;
+  }
+
+  async getNoteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<NoteRelationship[]> {
+    return Array.from(this.noteRelationshipsMap.values())
+      .filter(r => r.enrichmentRunId === enrichmentRunId)
+      .sort((a, b) => b.confidence - a.confidence);
+  }
+
+  async getRelationshipsForNote(noteId: string): Promise<NoteRelationship[]> {
+    return Array.from(this.noteRelationshipsMap.values())
+      .filter(r => r.fromNoteId === noteId || r.toNoteId === noteId);
+  }
+
+  async updateNoteRelationshipStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteRelationship> {
+    const relationship = this.noteRelationshipsMap.get(id);
+    if (!relationship) throw new Error("Relationship not found");
+    const updated: NoteRelationship = {
+      ...relationship,
+      status,
+      approvedByUserId: status === "approved" ? userId : null,
+      updatedAt: new Date(),
+    };
+    this.noteRelationshipsMap.set(id, updated);
+    return updated;
+  }
+
+  async bulkUpdateRelationshipStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number> {
+    let count = 0;
+    for (const id of ids) {
+      await this.updateNoteRelationshipStatus(id, status, userId);
+      count++;
+    }
+    return count;
+  }
+
+  async deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void> {
+    for (const [id, relationship] of Array.from(this.noteRelationshipsMap.entries())) {
+      if (relationship.enrichmentRunId === enrichmentRunId) {
+        this.noteRelationshipsMap.delete(id);
+      }
+    }
+  }
+
   clear(): void {
     this.users.clear();
     this.teams.clear();
@@ -580,5 +976,11 @@ export class MemoryStorage implements IStorage {
     this.backlinks.clear();
     this.userAvailabilityMap.clear();
     this.sessionOverridesMap.clear();
+    this.importRunsMap.clear();
+    this.noteImportSnapshotsMap.clear();
+    // PRD-016: AI Enrichment
+    this.enrichmentRunsMap.clear();
+    this.noteClassificationsMap.clear();
+    this.noteRelationshipsMap.clear();
   }
 }
