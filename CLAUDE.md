@@ -75,6 +75,41 @@ A PRD is not complete until:
 1. All acceptance criteria have corresponding tests
 2. Tests pass (`npx vitest run`)
 3. No regressions in existing tests
+4. PRD status section updated to "Done"
+5. PRD implementation notes section updated with relevant details
+
+## PRD Structure
+
+All PRDs in `docs/prd/` must include the following sections:
+
+### Required Sections
+1. **Status**: Track implementation progress
+   - `To Do` - Not started
+   - `In Progress` - Currently being implemented
+   - `Done` - Implementation complete with tests passing
+
+2. **Implementation Notes**: Updated after completion with:
+   - Files modified
+   - Key technical decisions
+   - Any deviations from the original spec
+   - Test coverage notes
+
+### Example PRD Footer
+```markdown
+## Status
+Done
+
+## Implementation Notes
+- Modified: `server/routes.ts`, `client/src/components/foo.tsx`
+- Added polling mechanism instead of SSE for simplicity
+- Test coverage: `server/foo.api.test.ts` (6 tests)
+```
+
+### Test Coverage is Mandatory
+**Test coverage cannot be skipped.** Every PRD implementation must include:
+- Unit tests for new shared utilities
+- Integration tests for new API endpoints
+- Tests that verify all acceptance criteria
 
 ## Game Systems
 

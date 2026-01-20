@@ -107,6 +107,9 @@ export const teams = pgTable("teams", {
   recurrenceAnchorDate: timestamp("recurrence_anchor_date"),
   minAttendanceThreshold: integer("min_attendance_threshold").default(2),
   defaultSessionDurationMinutes: integer("default_session_duration_minutes").default(180), // PRD-010A: 3 hours default
+  // PRD-027: AI Features paywall
+  aiEnabled: boolean("ai_enabled").default(false).notNull(),
+  aiEnabledAt: timestamp("ai_enabled_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -121,6 +124,9 @@ export const teamMembers = pgTable("team_members", {
   characterType1: text("character_type1"), // Race/Ancestry/Clan/Tribe depending on game
   characterType2: text("character_type2"), // Class/Auspice depending on game
   characterDescription: text("character_description"),
+  // PRD-028: Per-member AI features toggle
+  aiEnabled: boolean("ai_enabled").default(false).notNull(),
+  aiEnabledAt: timestamp("ai_enabled_at"),
   joinedAt: timestamp("joined_at").defaultNow(),
 });
 
@@ -134,8 +140,9 @@ export const invites = pgTable("invites", {
 });
 
 // Notes table
-// Original types + import types (person, place, collection, note)
-export const NOTE_TYPES = ["location", "character", "npc", "poi", "quest", "session_log", "person", "place", "collection", "note"] as const;
+// Consolidated entity types (PRD-018: removed redundant person, place, collection)
+// PRD-019: Renamed "location" to "area"
+export const NOTE_TYPES = ["area", "character", "npc", "poi", "quest", "session_log", "note"] as const;
 export type NoteType = typeof NOTE_TYPES[number];
 
 // Quest status enum (PRD-004)
@@ -321,7 +328,8 @@ export const noteImportSnapshots = pgTable("note_import_snapshots", {
 export const ENRICHMENT_STATUSES = ["pending", "running", "completed", "failed"] as const;
 export type EnrichmentStatus = typeof ENRICHMENT_STATUSES[number];
 
-export const INFERRED_ENTITY_TYPES = ["Person", "Place", "Quest", "SessionLog", "Note"] as const;
+// PRD-019: Renamed "Location" to "Area"
+export const INFERRED_ENTITY_TYPES = ["Character", "NPC", "Area", "Quest", "SessionLog", "Note"] as const;
 export type InferredEntityType = typeof INFERRED_ENTITY_TYPES[number];
 
 export const CLASSIFICATION_STATUSES = ["pending", "approved", "rejected"] as const;
@@ -386,6 +394,57 @@ export const noteRelationships = pgTable("note_relationships", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
+
+// PRD-043: AI Cache types
+export const AI_CACHE_TYPES = ["classification", "relationship"] as const;
+export type AICacheType = typeof AI_CACHE_TYPES[number];
+
+// PRD-043: AI Cache Entries table - Persistent cache for AI enrichment results
+export const aiCacheEntries = pgTable("ai_cache_entries", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  // Cache key components
+  cacheType: text("cache_type").notNull().$type<AICacheType>(),
+  contentHash: varchar("content_hash", { length: 64 }).notNull(), // SHA-256
+  algorithmVersion: varchar("algorithm_version", { length: 20 }).notNull(),
+  contextHash: varchar("context_hash", { length: 64 }), // For PC names context
+  // Cache scope (required - team isolation)
+  teamId: varchar("team_id").notNull(),
+  // Cached result (ClassificationResult or RelationshipResult)
+  result: json("result").notNull(),
+  // Metadata
+  modelId: varchar("model_id", { length: 100 }).notNull(),
+  tokensSaved: integer("tokens_saved"),
+  hitCount: integer("hit_count").default(0),
+  // Timestamps
+  createdAt: timestamp("created_at").defaultNow(),
+  lastHitAt: timestamp("last_hit_at"),
+  expiresAt: timestamp("expires_at"),
+});
+
+// PRD-043: AI Algorithm Versions table - Track prompt/algorithm versions for cache invalidation
+export const aiAlgorithmVersions = pgTable("ai_algorithm_versions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  operationType: text("operation_type").notNull().$type<AICacheType>(),
+  version: varchar("version", { length: 20 }).notNull(),
+  description: text("description"),
+  promptHash: varchar("prompt_hash", { length: 64 }), // SHA-256 of system prompt
+  isCurrent: boolean("is_current").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+  deprecatedAt: timestamp("deprecated_at"),
+});
+
+// PRD-043: Cache statistics for developer monitoring
+export interface AICacheStats {
+  totalEntries: number;
+  entriesByType: {
+    classification: number;
+    relationship: number;
+  };
+  totalHits: number;
+  oldestEntry: Date | null;
+  newestEntry: Date | null;
+  entriesExpiringSoon: number; // Within 7 days
+}
 
 // Relations
 export const teamsRelations = relations(teams, ({ many }) => ({
@@ -463,6 +522,11 @@ export const noteRelationshipsRelations = relations(noteRelationships, ({ one })
   enrichmentRun: one(enrichmentRuns, { fields: [noteRelationships.enrichmentRunId], references: [enrichmentRuns.id] }),
 }));
 
+// PRD-043: AI Cache relations
+export const aiCacheEntriesRelations = relations(aiCacheEntries, ({ one }) => ({
+  team: one(teams, { fields: [aiCacheEntries.teamId], references: [teams.id] }),
+}));
+
 // Insert schemas
 export const insertTeamSchema = createInsertSchema(teams).omit({ id: true, createdAt: true });
 export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({ id: true, joinedAt: true });
@@ -480,6 +544,9 @@ export const insertNoteImportSnapshotSchema = createInsertSchema(noteImportSnaps
 export const insertEnrichmentRunSchema = createInsertSchema(enrichmentRuns).omit({ id: true, createdAt: true });
 export const insertNoteClassificationSchema = createInsertSchema(noteClassifications).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertNoteRelationshipSchema = createInsertSchema(noteRelationships).omit({ id: true, createdAt: true, updatedAt: true });
+// PRD-043: AI Cache insert schemas
+export const insertAICacheEntrySchema = createInsertSchema(aiCacheEntries).omit({ id: true, createdAt: true });
+export const insertAIAlgorithmVersionSchema = createInsertSchema(aiAlgorithmVersions).omit({ id: true, createdAt: true });
 
 // Types
 export type Team = typeof teams.$inferSelect;
@@ -513,3 +580,8 @@ export type NoteClassification = typeof noteClassifications.$inferSelect;
 export type InsertNoteClassification = z.infer<typeof insertNoteClassificationSchema>;
 export type NoteRelationship = typeof noteRelationships.$inferSelect;
 export type InsertNoteRelationship = z.infer<typeof insertNoteRelationshipSchema>;
+// PRD-043: AI Cache types
+export type AICacheEntry = typeof aiCacheEntries.$inferSelect;
+export type InsertAICacheEntry = z.infer<typeof insertAICacheEntrySchema>;
+export type AIAlgorithmVersion = typeof aiAlgorithmVersions.$inferSelect;
+export type InsertAIAlgorithmVersion = z.infer<typeof insertAIAlgorithmVersionSchema>;

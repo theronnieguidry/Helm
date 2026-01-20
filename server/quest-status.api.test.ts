@@ -80,7 +80,7 @@ describe("Quest Status API (PRD-004)", () => {
         .post(`/api/teams/${teamId}/notes`)
         .send({
           title: "Silverwood Tavern",
-          noteType: "location",
+          noteType: "area",
         })
         .expect(200);
 
@@ -169,7 +169,7 @@ describe("Quest Status API (PRD-004)", () => {
       // Create a location to link
       const locationRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       const createRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)

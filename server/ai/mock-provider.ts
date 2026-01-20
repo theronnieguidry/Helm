@@ -9,14 +9,21 @@ import type {
   AIProvider,
   NoteForClassification,
   ClassificationResult,
+  ClassificationOptions,
   NoteWithClassification,
   RelationshipResult,
+  NoteReference,
+  ExtractedEntity,
+  EntityRelationship,
+  EntityExtractionResult,
+  ProgressCallback,
 } from "./ai-provider";
 import type { InferredEntityType, RelationshipType, EvidenceType } from "@shared/schema";
 
 export class MockAIProvider implements AIProvider {
   private mockClassifications: Map<string, ClassificationResult> = new Map();
   private mockRelationships: RelationshipResult[] = [];
+  private mockEntityExtraction: EntityExtractionResult | null = null;
   private defaultConfidence = 0.75;
 
   /**
@@ -61,14 +68,60 @@ export class MockAIProvider implements AIProvider {
   }
 
   /**
+   * PRD-026: Set mock entity extraction result
+   */
+  setMockEntityExtraction(result: EntityExtractionResult): void {
+    this.mockEntityExtraction = result;
+  }
+
+  /**
+   * PRD-026: Add a mock entity to the extraction result
+   */
+  addMockEntity(entity: Partial<ExtractedEntity> & { name: string }): void {
+    if (!this.mockEntityExtraction) {
+      this.mockEntityExtraction = { entities: [], relationships: [] };
+    }
+    this.mockEntityExtraction.entities.push({
+      name: entity.name,
+      type: entity.type ?? "npc",
+      confidence: entity.confidence ?? this.defaultConfidence,
+      mentions: entity.mentions ?? 1,
+      context: entity.context,
+      matchedNoteId: entity.matchedNoteId,
+    });
+  }
+
+  /**
+   * PRD-026: Add a mock entity relationship
+   */
+  addMockEntityRelationship(relationship: Partial<EntityRelationship> & { entity1: string; entity2: string }): void {
+    if (!this.mockEntityExtraction) {
+      this.mockEntityExtraction = { entities: [], relationships: [] };
+    }
+    this.mockEntityExtraction.relationships.push({
+      entity1: relationship.entity1,
+      entity2: relationship.entity2,
+      relationship: relationship.relationship ?? "related to",
+      confidence: relationship.confidence ?? this.defaultConfidence,
+    });
+  }
+
+  /**
    * Clear all mock data
    */
   clear(): void {
     this.mockClassifications.clear();
     this.mockRelationships = [];
+    this.mockEntityExtraction = null;
   }
 
-  async classifyNotes(notes: NoteForClassification[]): Promise<ClassificationResult[]> {
+  async classifyNotes(
+    notes: NoteForClassification[],
+    _onProgress?: ProgressCallback,
+    _options?: ClassificationOptions
+  ): Promise<ClassificationResult[]> {
+    // Note: Mock provider ignores options for simplicity
+    // Tests can use setMockClassification for specific behavior
     return notes.map((note) => {
       // Return mock if set
       const mock = this.mockClassifications.get(note.id);
@@ -106,7 +159,7 @@ export class MockAIProvider implements AIProvider {
     ];
     if (personIndicators.some((ind) => title.includes(ind)) ||
         title.match(/^[A-Z][a-z]+ [A-Z][a-z]+$/)) { // Two capitalized words
-      inferredType = "Person";
+      inferredType = "NPC";
       explanation = "Title contains person indicator";
       confidence = 0.80;
     }
@@ -119,7 +172,7 @@ export class MockAIProvider implements AIProvider {
       "kingdom", "empire", "realm", "lands of",
     ];
     if (placeIndicators.some((ind) => title.includes(ind))) {
-      inferredType = "Place";
+      inferredType = "Area";
       explanation = "Title contains place indicator";
       confidence = 0.85;
     }
@@ -178,5 +231,71 @@ export class MockAIProvider implements AIProvider {
     }
 
     return entities.slice(0, 10); // Limit to 10 entities
+  }
+
+  // PRD-026: Entity Extraction
+
+  async extractEntities(content: string, existingNotes?: NoteReference[]): Promise<EntityExtractionResult> {
+    // Return mock if set
+    if (this.mockEntityExtraction) {
+      return this.mockEntityExtraction;
+    }
+
+    // Generate default extraction from content
+    return this.generateDefaultEntityExtraction(content, existingNotes);
+  }
+
+  private generateDefaultEntityExtraction(content: string, existingNotes?: NoteReference[]): EntityExtractionResult {
+    const entities: ExtractedEntity[] = [];
+    const relationships: EntityRelationship[] = [];
+
+    // Simple heuristic extraction for testing
+    const entityNames = this.extractSimpleEntities(content);
+
+    for (const name of entityNames) {
+      // Try to match to existing notes
+      let matchedNoteId: string | undefined;
+      if (existingNotes) {
+        const match = existingNotes.find(
+          n => n.title.toLowerCase().includes(name.toLowerCase())
+        );
+        if (match) {
+          matchedNoteId = match.id;
+        }
+      }
+
+      entities.push({
+        name,
+        type: "npc", // Default to npc for simple extraction
+        confidence: this.defaultConfidence,
+        mentions: 1,
+        context: undefined,
+        matchedNoteId,
+      });
+    }
+
+    // Extract simple place indicators
+    const placeIndicators = ["castle", "tower", "city", "town", "forest", "river", "tavern", "inn"];
+    const lowerContent = content.toLowerCase();
+    for (const indicator of placeIndicators) {
+      const regex = new RegExp(`([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)\\s+${indicator}`, "gi");
+      const matches = content.match(regex);
+      if (matches) {
+        for (const match of matches) {
+          if (!entities.some(e => e.name.toLowerCase() === match.toLowerCase())) {
+            entities.push({
+              name: match,
+              type: "place",
+              confidence: 0.80,
+              mentions: 1,
+              context: undefined,
+              matchedNoteId: undefined,
+            });
+          }
+        }
+      }
+    }
+
+    return { entities, relationships };
   }
 }

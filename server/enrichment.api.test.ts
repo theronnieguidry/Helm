@@ -215,7 +215,7 @@ describe("Enrichment API (PRD-016)", () => {
       const classification = await storage.createNoteClassification({
         noteId: note1.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         explanation: "Name pattern suggests a person (Gandalf)",
         extractedEntities: ["wizard", "fellowship"],
@@ -225,7 +225,7 @@ describe("Enrichment API (PRD-016)", () => {
       expect(classification.id).toBeDefined();
       expect(classification.noteId).toBe(note1.id);
       expect(classification.enrichmentRunId).toBe(enrichmentRun.id);
-      expect(classification.inferredType).toBe("Person");
+      expect(classification.inferredType).toBe("NPC");
       expect(classification.confidence).toBe(0.92);
       expect(classification.status).toBe("pending");
     });
@@ -234,7 +234,7 @@ describe("Enrichment API (PRD-016)", () => {
       await storage.createNoteClassification({
         noteId: note1.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         status: "pending",
       });
@@ -242,22 +242,22 @@ describe("Enrichment API (PRD-016)", () => {
       await storage.createNoteClassification({
         noteId: note2.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Place",
+        inferredType: "Area",
         confidence: 0.88,
         status: "pending",
       });
 
       const classifications = await storage.getNoteClassificationsByEnrichmentRun(enrichmentRun.id);
       expect(classifications.length).toBe(2);
-      expect(classifications.map(c => c.inferredType)).toContain("Person");
-      expect(classifications.map(c => c.inferredType)).toContain("Place");
+      expect(classifications.map(c => c.inferredType)).toContain("NPC");
+      expect(classifications.map(c => c.inferredType)).toContain("Area");
     });
 
     it("should get single classification by note ID", async () => {
       await storage.createNoteClassification({
         noteId: note1.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         status: "pending",
       });
@@ -266,14 +266,14 @@ describe("Enrichment API (PRD-016)", () => {
       const fetched = await storage.getNoteClassification(note1.id);
       expect(fetched).toBeDefined();
       expect(fetched?.noteId).toBe(note1.id);
-      expect(fetched?.inferredType).toBe("Person");
+      expect(fetched?.inferredType).toBe("NPC");
     });
 
     it("should update classification status to approved", async () => {
       const classification = await storage.createNoteClassification({
         noteId: note1.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         status: "pending",
       });
@@ -312,7 +312,7 @@ describe("Enrichment API (PRD-016)", () => {
       const c1 = await storage.createNoteClassification({
         noteId: note1.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         status: "pending",
       });
@@ -320,7 +320,7 @@ describe("Enrichment API (PRD-016)", () => {
       const c2 = await storage.createNoteClassification({
         noteId: note2.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Place",
+        inferredType: "Area",
         confidence: 0.88,
         status: "pending",
       });
@@ -341,7 +341,7 @@ describe("Enrichment API (PRD-016)", () => {
       await storage.createNoteClassification({
         noteId: note1.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         status: "pending",
       });
@@ -349,7 +349,7 @@ describe("Enrichment API (PRD-016)", () => {
       await storage.createNoteClassification({
         noteId: note2.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Place",
+        inferredType: "Area",
         confidence: 0.88,
         status: "pending",
       });
@@ -387,7 +387,7 @@ describe("Enrichment API (PRD-016)", () => {
         authorId: testUser.id,
         title: "Frodo Baggins",
         content: "A hobbit tasked with carrying the Ring.",
-        noteType: "person",
+        noteType: "npc",
         importRunId: importRun.id,
       });
 
@@ -396,7 +396,7 @@ describe("Enrichment API (PRD-016)", () => {
         authorId: testUser.id,
         title: "Mount Doom",
         content: "The volcanic mountain where the Ring was forged.",
-        noteType: "place",
+        noteType: "poi",
         importRunId: importRun.id,
       });
 
@@ -619,7 +619,7 @@ describe("Enrichment API (PRD-016)", () => {
       const classification = await storage.createNoteClassification({
         noteId: note.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.92,
         status: "pending",
       });
@@ -643,7 +643,7 @@ describe("Enrichment API (PRD-016)", () => {
       const classification = await storage.createNoteClassification({
         noteId: note.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Place",
+        inferredType: "Area",
         confidence: 0.72,
         status: "pending",
       });
@@ -698,7 +698,7 @@ describe("Enrichment API (PRD-016)", () => {
         storage.createNoteClassification({
           noteId: notes[0].id,
           enrichmentRunId: enrichmentRun.id,
-          inferredType: "Place",
+          inferredType: "Area",
           confidence: 0.88,
           explanation: "Forest location mentioned",
           status: "pending",
@@ -706,7 +706,7 @@ describe("Enrichment API (PRD-016)", () => {
         storage.createNoteClassification({
           noteId: notes[1].id,
           enrichmentRunId: enrichmentRun.id,
-          inferredType: "Person",
+          inferredType: "NPC",
           confidence: 0.85,
           explanation: "Character title 'Elder Druid' suggests person",
           status: "pending",
@@ -817,7 +817,7 @@ describe("Enrichment API (PRD-016)", () => {
       await storage.createNoteClassification({
         noteId: note.id,
         enrichmentRunId: enrichmentRun.id,
-        inferredType: "Person",
+        inferredType: "NPC",
         confidence: 0.85,
         status: "approved",
       });

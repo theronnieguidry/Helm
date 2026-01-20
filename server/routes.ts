@@ -9,11 +9,21 @@ import { generateSessionCandidates } from "@shared/recurrence";
 import {
   processNuclinoExport,
   resolveNuclinoLinks,
+  isCollectionPage,
   type NuclinoPage,
   type PageClassification,
   type ImportSummary,
   type CollectionInfo,
 } from "@shared/nuclino-parser";
+import type {
+  AIPreviewResponse,
+  BaselineClassification,
+  AIClassification,
+  AIRelationship,
+  BaselineSummary,
+  AIEnhancedSummary,
+} from "@shared/ai-preview-types";
+import { areTypesEquivalent, mapNoteTypeToInferredType } from "@shared/ai-preview-types";
 
 // PRD-015: Multer config for ZIP file uploads (store in memory)
 const upload = multer({
@@ -54,6 +64,73 @@ function cleanupExpiredPlans() {
 
 // Run cleanup every 5 minutes
 setInterval(cleanupExpiredPlans, 5 * 60 * 1000);
+
+// PRD-030: In-memory cache for AI preview results (5-minute TTL)
+interface AIPreviewCache {
+  teamId: string;
+  importPlanId: string;
+  response: AIPreviewResponse;
+  createdAt: Date;
+}
+const aiPreviewCache = new Map<string, AIPreviewCache>();
+
+// Clean up expired AI previews (older than 5 minutes)
+function cleanupExpiredAIPreviews() {
+  const now = Date.now();
+  const TTL = 5 * 60 * 1000; // 5 minutes
+  for (const [id, preview] of Array.from(aiPreviewCache.entries())) {
+    if (now - preview.createdAt.getTime() > TTL) {
+      aiPreviewCache.delete(id);
+    }
+  }
+}
+
+// Run AI preview cleanup every 2 minutes
+setInterval(cleanupExpiredAIPreviews, 2 * 60 * 1000);
+
+// PRD-035: In-memory progress tracking for long-running operations
+export interface ImportProgress {
+  operationId: string;
+  phase: 'classifying' | 'relationships' | 'creating' | 'linking' | 'complete';
+  current: number;
+  total: number;
+  currentItem?: string;
+  startedAt: number;
+}
+const importProgressCache = new Map<string, ImportProgress>();
+
+// Clean up stale progress entries (older than 10 minutes)
+function cleanupExpiredProgress() {
+  const now = Date.now();
+  const TTL = 10 * 60 * 1000; // 10 minutes
+  for (const [id, progress] of Array.from(importProgressCache.entries())) {
+    if (now - progress.startedAt > TTL) {
+      importProgressCache.delete(id);
+    }
+  }
+}
+
+// Run progress cleanup every 5 minutes
+setInterval(cleanupExpiredProgress, 5 * 60 * 1000);
+
+// PRD-035: Helper to update progress
+export function updateImportProgress(
+  operationId: string,
+  phase: ImportProgress['phase'],
+  current: number,
+  total: number,
+  currentItem?: string
+) {
+  const existing = importProgressCache.get(operationId);
+  importProgressCache.set(operationId, {
+    operationId,
+    phase,
+    current,
+    total,
+    currentItem,
+    startedAt: existing?.startedAt || Date.now(),
+  });
+}
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -206,38 +283,51 @@ export async function registerRoutes(
     }
   });
 
-  // Update team member character info
+  // Update team member (character info + AI settings)
   app.patch("/api/teams/:teamId/members/:memberId", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
       const { teamId, memberId } = req.params;
-      const { characterName, characterType1, characterType2, characterDescription } = req.body;
-      
-      // User can only update their own character info (or DM can update any)
+      const { characterName, characterType1, characterType2, characterDescription, aiEnabled, aiEnabledAt } = req.body;
+
+      // User can only update their own info (or DM can update any)
       const currentMember = await storage.getTeamMember(teamId, userId);
       if (!currentMember) {
         return res.status(403).json({ message: "Not a team member" });
       }
-      
+
       // Get the target member to check if it's the user's own membership
       const members = await storage.getTeamMembers(teamId);
       const targetMember = members.find(m => m.id === memberId);
       if (!targetMember) {
         return res.status(404).json({ message: "Member not found" });
       }
-      
-      // Only allow updating own character info or if user is DM
+
+      // Only allow updating own info or if user is DM
       if (targetMember.userId !== userId && currentMember.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized to update this character" });
+        return res.status(403).json({ message: "Not authorized to update this member" });
       }
 
-      const updated = await storage.updateTeamMember(memberId, {
-        characterName: characterName ?? null,
-        characterType1: characterType1 ?? null,
-        characterType2: characterType2 ?? null,
-        characterDescription: characterDescription ?? null,
-      });
-      
+      // PRD-028: Build update object with character and AI fields
+      const updateData: {
+        characterName?: string | null;
+        characterType1?: string | null;
+        characterType2?: string | null;
+        characterDescription?: string | null;
+        aiEnabled?: boolean;
+        aiEnabledAt?: Date | null;
+      } = {};
+
+      // Only include fields that were provided in the request
+      if (characterName !== undefined) updateData.characterName = characterName ?? null;
+      if (characterType1 !== undefined) updateData.characterType1 = characterType1 ?? null;
+      if (characterType2 !== undefined) updateData.characterType2 = characterType2 ?? null;
+      if (characterDescription !== undefined) updateData.characterDescription = characterDescription ?? null;
+      if (aiEnabled !== undefined) updateData.aiEnabled = aiEnabled;
+      if (aiEnabledAt !== undefined) updateData.aiEnabledAt = aiEnabledAt ? new Date(aiEnabledAt) : null;
+
+      const updated = await storage.updateTeamMember(memberId, updateData);
+
       res.json(updated);
     } catch (error) {
       console.error("Error updating member:", error);
@@ -327,7 +417,7 @@ export async function registerRoutes(
     try {
       const userId = req.user.claims.sub;
       const { teamId } = req.params;
-      
+
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
@@ -341,23 +431,80 @@ export async function registerRoutes(
     }
   });
 
-  // Create note
-  app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
+  // PRD-019: Get today's session note
+  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
       const { teamId } = req.params;
-      
+
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
       }
 
+      const todaySession = await storage.findSessionByDate(teamId, new Date());
+      res.json(todaySession ?? null);
+    } catch (error) {
+      console.error("Error fetching today's session:", error);
+      res.status(500).json({ message: "Failed to fetch today's session" });
+    }
+  });
+
+  // PRD-037: Get notes needing review (low-confidence AI classifications)
+  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const items = await storage.getPendingLowConfidenceClassifications(teamId);
+      res.json({ items, count: items.length });
+    } catch (error) {
+      console.error("Error fetching needs-review items:", error);
+      res.status(500).json({ message: "Failed to fetch needs-review items" });
+    }
+  });
+
+  // Create note
+  app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      // PRD-034: Accept importRunId for suggestion-created entities to enable cascade delete
+      const { title, content, noteType, isPrivate, questStatus, contentBlocks, sessionDate, linkedNoteIds, importRunId } = req.body;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // For session_log type, check if one already exists for the given date (idempotency)
+      if (noteType === "session_log" && sessionDate) {
+        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
+        if (existing) {
+          // Return existing session instead of creating duplicate
+          return res.status(200).json(existing);
+        }
+      }
+
       const note = await storage.createNote({
         teamId,
         authorId: userId,
-        ...req.body,
+        title,
+        content,
+        noteType,
+        isPrivate,
+        questStatus,
+        contentBlocks,
+        sessionDate: sessionDate ? new Date(sessionDate) : undefined,
+        linkedNoteIds,
+        importRunId: importRunId || undefined, // PRD-034: Track import origin for cascade delete
       });
-      
+
       res.json(note);
     } catch (error) {
       console.error("Error creating note:", error);
@@ -385,7 +532,12 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Not authorized to edit this note" });
       }
 
-      const note = await storage.updateNote(noteId, req.body);
+      const updateData = {
+        ...req.body,
+        sessionDate: req.body.sessionDate ? new Date(req.body.sessionDate) : req.body.sessionDate,
+      };
+
+      const note = await storage.updateNote(noteId, updateData);
       res.json(note);
     } catch (error) {
       console.error("Error updating note:", error);
@@ -557,8 +709,15 @@ export async function registerRoutes(
         return res.status(400).json({ message: "ZIP file contains no .md files" });
       }
 
-      // Process the export
-      const { pages, collections, classifications, summary } = processNuclinoExport(mdEntries);
+      // PRD-040: Fetch team member character names for PC detection
+      const teamMembers = await storage.getTeamMembers(teamId);
+      const detectedPCNames = teamMembers
+        .map(m => m.characterName)
+        .filter((name): name is string => !!name);
+      const partyMemberNames = new Set(detectedPCNames.map(n => n.toLowerCase()));
+
+      // Process the export with party member names for PC detection
+      const { pages, collections, classifications, summary } = processNuclinoExport(mdEntries, partyMemberNames);
 
       // Generate unique import plan ID
       const importPlanId = `${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -589,6 +748,7 @@ export async function registerRoutes(
         importPlanId,
         summary,
         pages: pagesList,
+        detectedPCNames, // PRD-040: Return detected PC names for UI
       });
     } catch (error) {
       console.error("Error parsing Nuclino ZIP:", error);
@@ -596,12 +756,12 @@ export async function registerRoutes(
     }
   });
 
-  // PRD-015: Nuclino Import - Commit import plan (updated for PRD-015A)
+  // PRD-015: Nuclino Import - Commit import plan (updated for PRD-015A, PRD-030)
   app.post("/api/teams/:teamId/imports/nuclino/commit", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
       const { teamId } = req.params;
-      const { importPlanId, options } = req.body;
+      const { importPlanId, options, useAIClassifications, aiPreviewId } = req.body;
 
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
@@ -618,10 +778,47 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Import plan belongs to a different team" });
       }
 
-      const importEmptyPages = options?.importEmptyPages !== false;
+      // PRD-030: Retrieve AI preview if using AI classifications
+      let aiPreview: AIPreviewCache | undefined;
+      if (useAIClassifications && aiPreviewId) {
+        aiPreview = aiPreviewCache.get(aiPreviewId);
+        if (!aiPreview || aiPreview.teamId !== teamId || aiPreview.importPlanId !== importPlanId) {
+          return res.status(404).json({ message: "AI preview not found or expired" });
+        }
+      }
+
+      // PRD-042: Support granular empty page exclusion with backward compatibility
+      let excludedEmptyPageIds: Set<string>;
+      if (options?.excludedEmptyPageIds && Array.isArray(options.excludedEmptyPageIds)) {
+        // New format: explicit list of empty page IDs to exclude
+        excludedEmptyPageIds = new Set(options.excludedEmptyPageIds);
+      } else {
+        // Legacy format: boolean importEmptyPages (defaults to true)
+        const importEmptyPages = options?.importEmptyPages !== false;
+        excludedEmptyPageIds = importEmptyPages
+          ? new Set()
+          : new Set(plan.pages.filter(p => p.isEmpty).map(p => p.sourcePageId));
+      }
       const defaultVisibility: ImportVisibility = options?.defaultVisibility || "private";
       const isPrivate = defaultVisibility === "private";
-      const pagesToImport = plan.pages.filter(p => importEmptyPages || !p.isEmpty);
+      const pagesToImport = plan.pages.filter(p => !p.isEmpty || !excludedEmptyPageIds.has(p.sourcePageId));
+
+      // PRD-035: Use client-provided operation ID or generate one for progress tracking
+      const commitOperationId = req.body.operationId || `commit-${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const totalPages = pagesToImport.length;
+
+      // PRD-030: Build AI classification map for quick lookup
+      const aiClassificationMap = new Map<string, { inferredType: string; confidence: number; explanation: string; extractedEntities: string[] }>();
+      if (aiPreview) {
+        for (const aiClass of aiPreview.response.aiEnhanced.classifications) {
+          aiClassificationMap.set(aiClass.sourcePageId, {
+            inferredType: aiClass.inferredType,
+            confidence: aiClass.confidence,
+            explanation: aiClass.explanation,
+            extractedEntities: aiClass.extractedEntities,
+          });
+        }
+      }
 
       // PRD-015A: Create import run record FIRST
       const importRun = await storage.createImportRun({
@@ -644,9 +841,32 @@ export async function registerRoutes(
       let linksResolved = 0;
       const warnings: string[] = [];
 
+      // PRD-035: Initialize progress for creating phase
+      updateImportProgress(commitOperationId, 'creating', 0, totalPages, 'Starting import...');
+
+      let processedCount = 0;
       for (const page of pagesToImport) {
+        // PRD-035: Update progress
+        updateImportProgress(commitOperationId, 'creating', processedCount, totalPages, page.title);
         const classification = plan.classifications.get(page.sourcePageId);
-        const noteType = (classification?.noteType || "note") as NoteType;
+
+        // PRD-030: Use AI classification if available, otherwise fall back to baseline
+        const aiClass = aiClassificationMap.get(page.sourcePageId);
+        let noteType: NoteType;
+        if (aiClass && useAIClassifications) {
+          // Map AI inferred type to note type
+          const typeMapping: Record<string, NoteType> = {
+            "Character": "character",
+            "NPC": "npc",
+            "Area": "poi",
+            "Quest": "quest",
+            "SessionLog": "session_log",
+            "Note": "note",
+          };
+          noteType = typeMapping[aiClass.inferredType] || "note";
+        } else {
+          noteType = (classification?.noteType || "note") as NoteType;
+        }
         const questStatus = classification?.questStatus as QuestStatus | undefined;
 
         try {
@@ -709,12 +929,23 @@ export async function registerRoutes(
           warnings.push(`Failed to import: ${page.title}`);
           skipped++;
         }
+        processedCount++;
       }
 
+      // PRD-035: Update progress for linking phase
+      updateImportProgress(commitOperationId, 'linking', 0, totalPages, 'Resolving links...');
+
       // Second pass: Resolve links and update content
+      let linkedCount = 0;
       for (const page of pagesToImport) {
         const noteId = sourcePageIdToNoteId.get(page.sourcePageId);
-        if (!noteId) continue;
+        if (!noteId) {
+          linkedCount++;
+          continue;
+        }
+
+        // PRD-035: Update progress
+        updateImportProgress(commitOperationId, 'linking', linkedCount, totalPages, page.title);
 
         const { resolved, unresolvedLinks } = resolveNuclinoLinks(page.content, sourcePageIdToNoteId);
 
@@ -744,7 +975,11 @@ export async function registerRoutes(
             }
           }
         }
+        linkedCount++;
       }
+
+      // PRD-035: Mark progress as complete
+      updateImportProgress(commitOperationId, 'complete', totalPages, totalPages, 'Import complete');
 
       // PRD-015A: Update import run with final stats
       const stats: ImportRunStats = {
@@ -758,19 +993,406 @@ export async function registerRoutes(
       };
       await storage.updateImportRun(importRun.id, { stats });
 
+      // PRD-030: If using AI classifications, create enrichment run and store results
+      let enrichmentRunId: string | null = null;
+      if (aiPreview && useAIClassifications) {
+        // Import CONFIDENCE_THRESHOLDS for counting
+        const { CONFIDENCE_THRESHOLDS } = await import("./ai");
+
+        // Create enrichment run record
+        const enrichmentRun = await storage.createEnrichmentRun({
+          importRunId: importRun.id,
+          teamId,
+          createdByUserId: userId,
+          status: "completed",
+        });
+        enrichmentRunId = enrichmentRun.id;
+
+        // Store AI classifications as pending
+        let classificationsCreated = 0;
+        let highConfidenceCount = 0;
+        let lowConfidenceCount = 0;
+
+        for (const aiClass of aiPreview.response.aiEnhanced.classifications) {
+          const noteId = sourcePageIdToNoteId.get(aiClass.sourcePageId);
+          if (noteId) {
+            await storage.createNoteClassification({
+              noteId,
+              enrichmentRunId: enrichmentRun.id,
+              inferredType: aiClass.inferredType as import("@shared/schema").InferredEntityType,
+              confidence: aiClass.confidence,
+              explanation: aiClass.explanation,
+              extractedEntities: aiClass.extractedEntities,
+              status: "pending",
+            });
+            classificationsCreated++;
+
+            if (aiClass.confidence >= CONFIDENCE_THRESHOLDS.HIGH) {
+              highConfidenceCount++;
+            } else if (aiClass.confidence < CONFIDENCE_THRESHOLDS.REVIEW) {
+              lowConfidenceCount++;
+            }
+          }
+        }
+
+        // Store AI relationships as pending
+        let relationshipsFound = 0;
+        for (const rel of aiPreview.response.aiEnhanced.relationships) {
+          const fromNoteId = sourcePageIdToNoteId.get(rel.fromPageId);
+          const toNoteId = sourcePageIdToNoteId.get(rel.toPageId);
+
+          if (fromNoteId && toNoteId) {
+            await storage.createNoteRelationship({
+              enrichmentRunId: enrichmentRun.id,
+              fromNoteId,
+              toNoteId,
+              relationshipType: rel.relationshipType,
+              confidence: rel.confidence,
+              evidenceSnippet: rel.evidenceSnippet,
+              evidenceType: rel.evidenceType,
+              status: "pending",
+            });
+            relationshipsFound++;
+          }
+        }
+
+        // Update enrichment run with totals
+        const userReviewRequired = aiPreview.response.aiEnhanced.classifications.filter(
+          c => c.confidence < CONFIDENCE_THRESHOLDS.REVIEW
+        ).length + aiPreview.response.aiEnhanced.relationships.filter(
+          r => r.confidence < CONFIDENCE_THRESHOLDS.REVIEW
+        ).length;
+
+        await storage.updateEnrichmentRun(enrichmentRun.id, {
+          totals: {
+            notesProcessed: pagesToImport.length,
+            classificationsCreated,
+            relationshipsFound,
+            highConfidenceCount,
+            lowConfidenceCount,
+            userReviewRequired,
+          },
+        });
+
+        // Clean up AI preview cache
+        aiPreviewCache.delete(aiPreviewId);
+      }
+
       // Clean up the import plan from cache
       importPlanCache.delete(importPlanId);
 
       res.json({
         importRunId: importRun.id,
+        enrichmentRunId,
+        operationId: commitOperationId, // PRD-035: Include operation ID for progress tracking
         created,
         updated,
         skipped,
         warnings: warnings.slice(0, 50), // Limit warnings to 50
+        aiEnhanced: !!aiPreview,
       });
     } catch (error) {
       console.error("Error committing Nuclino import:", error);
       res.status(500).json({ message: "Failed to commit import" });
+    }
+  });
+
+  // PRD-030: AI-enhanced import preview (dry run)
+  app.post("/api/teams/:teamId/imports/nuclino/ai-preview", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { importPlanId, aiOptions } = req.body; // PRD-040: Accept aiOptions
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // FR-1: Check if AI features are enabled for this member
+      if (!member.aiEnabled) {
+        return res.status(403).json({
+          message: "AI features require a subscription",
+          code: "AI_SUBSCRIPTION_REQUIRED"
+        });
+      }
+
+      // Retrieve import plan from cache
+      const plan = importPlanCache.get(importPlanId);
+      if (!plan) {
+        return res.status(404).json({ message: "Import plan not found or expired" });
+      }
+
+      if (plan.teamId !== teamId) {
+        return res.status(403).json({ message: "Import plan belongs to a different team" });
+      }
+
+      // Check if API key is available
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({
+          message: "AI service is not configured",
+          code: "AI_NOT_CONFIGURED"
+        });
+      }
+
+      // PRD-040: Build PC names list from team members and user-provided options
+      const teamMembers = await storage.getTeamMembers(teamId);
+      const teamPCNames = teamMembers
+        .map(m => m.characterName)
+        .filter((name): name is string => !!name);
+      const allPCNames = [
+        ...teamPCNames,
+        ...(aiOptions?.playerCharacterNames || [])
+      ].filter((name, index, arr) => arr.indexOf(name) === index); // Deduplicate
+
+      // PRD-035: Use client-provided operation ID or generate one for progress tracking
+      const operationId = req.body.operationId || `ai-preview-${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      // Build baseline classifications from import plan
+      const baselineClassifications: BaselineClassification[] = plan.pages.map(page => {
+        const classification = plan.classifications.get(page.sourcePageId);
+        return {
+          sourcePageId: page.sourcePageId,
+          title: page.title,
+          noteType: (classification?.noteType || "note") as NoteType,
+          questStatus: classification?.questStatus as QuestStatus | undefined,
+          isEmpty: page.isEmpty,
+        };
+      });
+
+      // Build baseline summary from import plan
+      const baselineSummary: BaselineSummary = {
+        total: plan.summary.totalPages,
+        characters: plan.summary.characters,
+        npcs: plan.summary.npcs,
+        pois: plan.summary.pois,
+        questsOpen: plan.summary.questsOpen,
+        questsDone: plan.summary.questsDone,
+        notes: plan.summary.notes,
+        empty: plan.summary.emptyPages,
+      };
+
+      // PRD-040: Pre-classify collection/index pages before sending to AI
+      const preClassifiedPages = new Map<string, AIClassification>();
+      const pagesForAI: NuclinoPage[] = [];
+
+      for (const page of plan.pages) {
+        if (page.isEmpty) continue;
+
+        // Check if page is an index/collection page (mostly links)
+        if (isCollectionPage(page.content, page.links)) {
+          preClassifiedPages.set(page.sourcePageId, {
+            sourcePageId: page.sourcePageId,
+            title: page.title,
+            inferredType: "Note",
+            confidence: 0.85,
+            explanation: "Index/navigation page containing primarily links to other notes",
+            extractedEntities: [],
+          });
+        } else {
+          pagesForAI.push(page);
+        }
+      }
+
+      // Prepare notes for AI classification (using page content)
+      const notesForClassification = pagesForAI.map(page => ({
+        id: page.sourcePageId, // Use sourcePageId as temporary ID
+        title: page.title,
+        content: page.content || page.contentRaw || "",
+        currentType: plan.classifications.get(page.sourcePageId)?.noteType || "note",
+        existingLinks: page.links.map(l => l.text),
+      }));
+
+      // Dynamically import AI provider
+      const { createAIProvider, CONFIDENCE_THRESHOLDS } = await import("./ai");
+      const provider = createAIProvider();
+
+      // PRD-035: Initialize progress tracking
+      const totalClassificationNotes = notesForClassification.length;
+      updateImportProgress(operationId, 'classifying', 0, totalClassificationNotes, 'Starting classification...');
+
+      // Phase 1: Classify notes with AI (PRD-040: pass PC names)
+      const classificationResults = await provider.classifyNotes(
+        notesForClassification,
+        (current, total, currentItem) => {
+          updateImportProgress(operationId, 'classifying', current, total, currentItem);
+        },
+        allPCNames.length > 0 ? { playerCharacterNames: allPCNames } : undefined
+      );
+
+      // Build a map for quick lookup
+      const classificationMap = new Map(
+        classificationResults.map(r => [r.noteId, r])
+      );
+
+      // Build AI classifications (PRD-040: merge pre-classified index pages)
+      const aiClassifications: AIClassification[] = plan.pages.map(page => {
+        // PRD-040: Check if this was a pre-classified collection/index page
+        const preClassified = preClassifiedPages.get(page.sourcePageId);
+        if (preClassified) {
+          return preClassified;
+        }
+
+        const aiResult = classificationMap.get(page.sourcePageId);
+        const baselineType = plan.classifications.get(page.sourcePageId)?.noteType || "note";
+
+        if (aiResult) {
+          return {
+            sourcePageId: page.sourcePageId,
+            title: page.title,
+            inferredType: aiResult.inferredType,
+            confidence: aiResult.confidence,
+            explanation: aiResult.explanation,
+            extractedEntities: aiResult.extractedEntities,
+          };
+        } else {
+          // For empty pages or pages not sent to AI, use baseline mapping
+          return {
+            sourcePageId: page.sourcePageId,
+            title: page.title,
+            inferredType: mapNoteTypeToInferredType(baselineType as NoteType),
+            confidence: 0.5, // Low confidence for non-AI results
+            explanation: "Not analyzed by AI (empty page)",
+            extractedEntities: [],
+          };
+        }
+      });
+
+      // Phase 2: Extract relationships between pages
+      const notesWithClassifications = plan.pages
+        .filter(page => !page.isEmpty)
+        .map(page => {
+          const aiResult = classificationMap.get(page.sourcePageId);
+          const baselineType = plan.classifications.get(page.sourcePageId)?.noteType || "note";
+
+          return {
+            id: page.sourcePageId,
+            title: page.title,
+            content: page.content || page.contentRaw || "",
+            inferredType: (aiResult?.inferredType || mapNoteTypeToInferredType(baselineType as NoteType)) as import("@shared/schema").InferredEntityType,
+            internalLinks: page.links.map(l => ({
+              targetNoteId: l.targetPageId,
+              linkText: l.text,
+            })),
+          };
+        });
+
+      // PRD-035: Update progress for relationship extraction phase
+      updateImportProgress(operationId, 'relationships', 0, notesWithClassifications.length, 'Analyzing relationships...');
+
+      const relationshipResults = await provider.extractRelationships(notesWithClassifications, (current, total, currentItem) => {
+        updateImportProgress(operationId, 'relationships', current, total, currentItem);
+      });
+
+      // PRD-035: Mark progress as complete
+      updateImportProgress(operationId, 'complete', notesWithClassifications.length, notesWithClassifications.length, 'Analysis complete');
+
+      // Build title map for relationships
+      const titleMap = new Map(plan.pages.map(p => [p.sourcePageId, p.title]));
+
+      // Build AI relationships
+      const aiRelationships: AIRelationship[] = relationshipResults.map(r => ({
+        fromPageId: r.fromNoteId,
+        fromTitle: titleMap.get(r.fromNoteId) || "Unknown",
+        toPageId: r.toNoteId,
+        toTitle: titleMap.get(r.toNoteId) || "Unknown",
+        relationshipType: r.relationshipType,
+        confidence: r.confidence,
+        evidenceSnippet: r.evidenceSnippet,
+        evidenceType: r.evidenceType,
+      }));
+
+      // Calculate AI summary
+      const aiSummary: AIEnhancedSummary = {
+        total: plan.summary.totalPages,
+        npcs: aiClassifications.filter(c => c.inferredType === "NPC").length,
+        areas: aiClassifications.filter(c => c.inferredType === "Area").length,
+        quests: aiClassifications.filter(c => c.inferredType === "Quest").length,
+        characters: aiClassifications.filter(c => c.inferredType === "Character").length,
+        sessionLogs: aiClassifications.filter(c => c.inferredType === "SessionLog").length,
+        notes: aiClassifications.filter(c => c.inferredType === "Note").length,
+        relationshipsTotal: aiRelationships.length,
+        relationshipsHigh: aiRelationships.filter(r => r.confidence >= CONFIDENCE_THRESHOLDS.HIGH).length,
+        relationshipsMedium: aiRelationships.filter(r => r.confidence >= CONFIDENCE_THRESHOLDS.REVIEW && r.confidence < CONFIDENCE_THRESHOLDS.HIGH).length,
+        relationshipsLow: aiRelationships.filter(r => r.confidence >= CONFIDENCE_THRESHOLDS.LOW && r.confidence < CONFIDENCE_THRESHOLDS.REVIEW).length,
+      };
+
+      // Calculate diff stats
+      let changedCount = 0;
+      let upgradedCount = 0;
+
+      for (const aiClass of aiClassifications) {
+        const baseline = baselineClassifications.find(b => b.sourcePageId === aiClass.sourcePageId);
+        if (baseline) {
+          if (areTypesEquivalent(baseline.noteType, aiClass.inferredType)) {
+            // AI confirms baseline - count as upgraded
+            upgradedCount++;
+          } else {
+            // AI differs from baseline - count as changed
+            changedCount++;
+          }
+        }
+      }
+
+      // Generate preview ID
+      const previewId = `ai-preview-${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      // Build response
+      const response: AIPreviewResponse = {
+        previewId,
+        operationId, // PRD-035: Include operation ID for progress tracking
+        baseline: {
+          summary: baselineSummary,
+          classifications: baselineClassifications,
+        },
+        aiEnhanced: {
+          summary: aiSummary,
+          classifications: aiClassifications,
+          relationships: aiRelationships,
+        },
+        diff: {
+          changedCount,
+          upgradedCount,
+          totalPages: plan.summary.totalPages,
+        },
+      };
+
+      // Cache the preview result
+      aiPreviewCache.set(previewId, {
+        teamId,
+        importPlanId,
+        response,
+        createdAt: new Date(),
+      });
+
+      res.json(response);
+    } catch (error) {
+      console.error("Error generating AI preview:", error);
+      res.status(500).json({ message: "Failed to generate AI preview" });
+    }
+  });
+
+  // PRD-035: Get import progress for a specific operation
+  app.get("/api/teams/:teamId/imports/progress/:operationId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, operationId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const progress = importProgressCache.get(operationId);
+      if (!progress) {
+        return res.status(404).json({ message: "Progress not found" });
+      }
+
+      res.json(progress);
+    } catch (error) {
+      console.error("Error fetching import progress:", error);
+      res.status(500).json({ message: "Failed to fetch progress" });
     }
   });
 
@@ -912,6 +1534,14 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Not a team member" });
       }
 
+      // PRD-028: Check if AI features are enabled for this member
+      if (!member.aiEnabled) {
+        return res.status(403).json({
+          message: "AI features require a subscription",
+          code: "AI_SUBSCRIPTION_REQUIRED"
+        });
+      }
+
       const importRun = await storage.getImportRun(importId);
       if (!importRun || importRun.teamId !== teamId) {
         return res.status(404).json({ message: "Import run not found" });
@@ -1016,10 +1646,16 @@ export async function registerRoutes(
     try {
       const userId = req.user.claims.sub;
       const { teamId, classificationId } = req.params;
-      const { status } = req.body;
+      const { status, overrideType } = req.body;
 
       if (!["approved", "rejected"].includes(status)) {
         return res.status(400).json({ message: "Invalid status" });
+      }
+
+      // PRD-038: Validate overrideType if provided
+      const validTypes = ["Character", "NPC", "Area", "Quest", "SessionLog", "Note"];
+      if (overrideType && !validTypes.includes(overrideType)) {
+        return res.status(400).json({ message: "Invalid override type" });
       }
 
       const member = await storage.getTeamMember(teamId, userId);
@@ -1065,15 +1701,18 @@ export async function registerRoutes(
       const updated = await storage.updateNoteClassificationStatus(classificationId, status, userId);
 
       // If approved, update the note's type
+      // PRD-038: Use overrideType if provided, otherwise use inferredType
       if (status === "approved") {
         const noteTypeMap: Record<string, string> = {
-          Person: "person",
-          Place: "place",
+          Character: "character",
+          NPC: "npc",
+          Area: "area",
           Quest: "quest",
           SessionLog: "session_log",
           Note: "note",
         };
-        const newNoteType = noteTypeMap[updated.inferredType] || "note";
+        const typeToUse = overrideType || updated.inferredType;
+        const newNoteType = noteTypeMap[typeToUse] || "note";
         await storage.updateNote(updated.noteId, { noteType: newNoteType as NoteType });
       }
 
@@ -1118,8 +1757,9 @@ export async function registerRoutes(
         const updated = await storage.updateNoteClassificationStatus(id, "approved", userId);
         // Update note type
         const noteTypeMap: Record<string, string> = {
-          Person: "person",
-          Place: "place",
+          Character: "character",
+          NPC: "npc",
+          Area: "area",
           Quest: "quest",
           SessionLog: "session_log",
           Note: "note",
@@ -1249,6 +1889,58 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting enrichment run:", error);
       res.status(500).json({ message: "Failed to delete enrichment run" });
+    }
+  });
+
+  // PRD-026: Extract entities from session content using AI
+  app.post("/api/teams/:teamId/extract-entities", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const { content } = req.body;
+
+      // Verify team membership
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // PRD-028: Check if AI features are enabled for this member
+      if (!member.aiEnabled) {
+        return res.status(403).json({
+          message: "AI features require a subscription",
+          code: "AI_SUBSCRIPTION_REQUIRED"
+        });
+      }
+
+      // Validate content
+      if (!content || typeof content !== "string" || content.trim().length === 0) {
+        return res.status(400).json({ message: "Content is required" });
+      }
+
+      // Check for API key availability
+      if (!process.env.ANTHROPIC_API_KEY) {
+        return res.status(503).json({ message: "AI service not configured" });
+      }
+
+      // Get existing notes for matching
+      const existingNotes = await storage.getNotes(teamId);
+      const noteReferences = existingNotes.map(n => ({
+        id: n.id,
+        title: n.title,
+        noteType: n.noteType,
+      }));
+
+      // Import the AI provider dynamically to avoid issues when API key is not set
+      const { ClaudeAIProvider } = await import("./ai/claude-provider");
+      const aiProvider = new ClaudeAIProvider();
+
+      const result = await aiProvider.extractEntities(content, noteReferences);
+
+      res.json(result);
+    } catch (error) {
+      console.error("Error extracting entities:", error);
+      res.status(500).json({ message: "Failed to extract entities" });
     }
   });
 
@@ -1690,6 +2382,9 @@ export async function registerRoutes(
       res.status(500).json({ message: "Failed to delete session override" });
     }
   });
+
+  // PRD-043: AI Cache management is handled via CLI script (scripts/ai-cache-admin.ts)
+  // NOT exposed over HTTP for security reasons in published app
 
   return httpServer;
 }

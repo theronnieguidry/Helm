@@ -5,6 +5,7 @@ import {
   decodeHtmlEntities,
   extractNuclinoLinks,
   parseNuclinoContent,
+  stripDirectoryStructure,
   isCollectionPage,
   detectCollectionType,
   detectCollectionPages,
@@ -226,6 +227,57 @@ describe("parseNuclinoContent", () => {
 
     expect(result.content).toBe("Hello World");
   });
+
+  it("PRD-040: strips directory tree structure from content", () => {
+    const markdown = `Some text before
+
+├── folder/
+│   └── file.md
+└── another.md
+
+Some text after`;
+    const result = parseNuclinoContent(markdown);
+
+    // Directory structure should be removed
+    expect(result.content).toBe("Some text before\n\nSome text after");
+  });
+});
+
+describe("stripDirectoryStructure", () => {
+  it("removes lines with tree characters", () => {
+    const content = `├── folder/
+└── file.md`;
+    expect(stripDirectoryStructure(content)).toBe("");
+  });
+
+  it("preserves normal content", () => {
+    const content = "This is normal content with no tree structure.";
+    expect(stripDirectoryStructure(content)).toBe("This is normal content with no tree structure.");
+  });
+
+  it("handles mixed content", () => {
+    const content = `Start of content
+├── folder/
+│   ├── subfolder/
+│   └── file.md
+└── root.md
+
+End of content`;
+    const result = stripDirectoryStructure(content);
+    expect(result).toBe("Start of content\n\nEnd of content");
+  });
+
+  it("collapses multiple newlines", () => {
+    const content = `Line 1
+
+
+├── tree/
+
+
+Line 2`;
+    const result = stripDirectoryStructure(content);
+    expect(result).toBe("Line 1\n\nLine 2");
+  });
 });
 
 describe("isCollectionPage", () => {
@@ -392,10 +444,10 @@ describe("classifyNuclinoPage", () => {
     });
 
     const result = classifyNuclinoPage(page, emptyMembership, collections);
-    expect(result).toEqual({ noteType: "collection" });
+    expect(result).toEqual({ noteType: "note" });
   });
 
-  it("classifies people from Notable People collection", () => {
+  it("classifies NPCs from Notable People collection", () => {
     const page: NuclinoPage = {
       filename: "Alice 22222222.md",
       sourcePageId: "22222222",
@@ -410,10 +462,10 @@ describe("classifyNuclinoPage", () => {
     membership.set("22222222", ["notable_people"]);
 
     const result = classifyNuclinoPage(page, membership, emptyCollections);
-    expect(result).toEqual({ noteType: "person" });
+    expect(result).toEqual({ noteType: "npc" });
   });
 
-  it("classifies places from Places collection", () => {
+  it("classifies POIs from Places collection", () => {
     const page: NuclinoPage = {
       filename: "Tavern 33333333.md",
       sourcePageId: "33333333",
@@ -428,7 +480,7 @@ describe("classifyNuclinoPage", () => {
     membership.set("33333333", ["places"]);
 
     const result = classifyNuclinoPage(page, membership, emptyCollections);
-    expect(result).toEqual({ noteType: "place" });
+    expect(result).toEqual({ noteType: "poi" });
   });
 
   it("classifies open quests from To do collection", () => {
@@ -497,7 +549,7 @@ describe("classifyNuclinoPage", () => {
     membership.set("77777777", ["notable_people", "todo"]);
 
     const result = classifyNuclinoPage(page, membership, emptyCollections);
-    expect(result).toEqual({ noteType: "person" });
+    expect(result).toEqual({ noteType: "npc" });
   });
 
   it("classifies session log pages by title pattern", () => {
@@ -626,9 +678,9 @@ describe("generateImportSummary", () => {
     ];
 
     const classifications = new Map<string, { noteType: string; questStatus?: string }>();
-    classifications.set("1", { noteType: "collection" });
+    classifications.set("1", { noteType: "note" });
     classifications.set("2", { noteType: "note" });
-    classifications.set("3", { noteType: "person" });
+    classifications.set("3", { noteType: "npc" });
     classifications.set("4", { noteType: "quest", questStatus: "active" });
     classifications.set("5", { noteType: "quest", questStatus: "done" });
 
@@ -637,12 +689,12 @@ describe("generateImportSummary", () => {
     expect(summary).toEqual({
       totalPages: 5,
       emptyPages: 1,
-      collections: 1,
-      people: 1,
-      places: 0,
+      characters: 0,
+      npcs: 1,
+      pois: 0,
       questsOpen: 1,
       questsDone: 1,
-      notes: 1,
+      notes: 2,
     });
   });
 });
@@ -671,10 +723,10 @@ describe("processNuclinoExport", () => {
     expect(result.collections.size).toBe(2);
     expect(result.summary.totalPages).toBe(10);
     expect(result.summary.emptyPages).toBe(1);
-    expect(result.summary.collections).toBe(2);
-    expect(result.summary.people).toBe(3);
-    expect(result.summary.places).toBe(3);
-    // 2 notes: "Random Note" + "Empty" (empty pages are still classified)
-    expect(result.summary.notes).toBe(2);
+    expect(result.summary.characters).toBe(0);
+    expect(result.summary.npcs).toBe(3);
+    expect(result.summary.pois).toBe(3);
+    // 4 notes: "Notable People" + "Places" (collections) + "Random Note" + "Empty"
+    expect(result.summary.notes).toBe(4);
   });
 });

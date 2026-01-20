@@ -46,7 +46,7 @@ describe("Backlinks API (PRD-005)", () => {
       // Create target note
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "The Dragon's Lair", noteType: "location" });
+        .send({ title: "The Dragon's Lair", noteType: "area" });
       const targetNoteId = targetRes.body.id;
 
       // Create backlink
@@ -101,7 +101,7 @@ describe("Backlinks API (PRD-005)", () => {
     it("should reject backlink from non-existent source note", async () => {
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       await request(app)
         .post(`/api/teams/${teamId}/notes/${targetRes.body.id}/backlinks`)
@@ -148,7 +148,7 @@ describe("Backlinks API (PRD-005)", () => {
     it("should return empty array for note with no backlinks", async () => {
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Lonely Note", noteType: "location" });
+        .send({ title: "Lonely Note", noteType: "area" });
 
       const backlinksRes = await request(app)
         .get(`/api/teams/${teamId}/notes/${targetRes.body.id}/backlinks`)
@@ -169,7 +169,7 @@ describe("Backlinks API (PRD-005)", () => {
       // Create multiple target notes and backlinks
       const target1Res = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location 1", noteType: "location" });
+        .send({ title: "Location 1", noteType: "area" });
 
       const target2Res = await request(app)
         .post(`/api/teams/${teamId}/notes`)
@@ -199,7 +199,7 @@ describe("Backlinks API (PRD-005)", () => {
 
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       const backlinkRes = await request(app)
         .post(`/api/teams/${teamId}/notes/${targetRes.body.id}/backlinks`)
@@ -226,7 +226,7 @@ describe("Backlinks API (PRD-005)", () => {
 
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       await request(app)
         .post(`/api/teams/${teamId}/notes/${targetRes.body.id}/backlinks`)
@@ -252,7 +252,7 @@ describe("Backlinks API (PRD-005)", () => {
 
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       await request(app)
         .post(`/api/teams/${teamId}/notes/${targetRes.body.id}/backlinks`)
@@ -280,7 +280,7 @@ describe("Backlinks API (PRD-005)", () => {
 
       const targetRes = await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       await request(app)
         .post(`/api/teams/${teamId}/notes/${targetRes.body.id}/backlinks`)

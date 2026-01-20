@@ -1,8 +1,9 @@
 /**
  * PRD-016: AI Provider Interface
+ * PRD-026: Entity Extraction Extension
  *
- * Abstraction layer for AI services used in note classification
- * and relationship extraction during import enrichment.
+ * Abstraction layer for AI services used in note classification,
+ * relationship extraction during import enrichment, and entity extraction.
  */
 
 import type { InferredEntityType, RelationshipType, EvidenceType } from "@shared/schema";
@@ -16,6 +17,14 @@ export interface NoteForClassification {
   content: string;
   currentType: string;
   existingLinks: string[]; // Titles of linked notes
+}
+
+/**
+ * PRD-040: Options for AI classification
+ */
+export interface ClassificationOptions {
+  /** Player character names - notes about these should be classified as "Character" instead of "NPC" */
+  playerCharacterNames?: string[];
 }
 
 /**
@@ -61,16 +70,27 @@ export interface AIProvider {
   /**
    * Classify a batch of notes into entity types (Person, Place, Quest, etc.)
    * @param notes Notes to classify
+   * @param onProgress PRD-035: Optional callback for progress updates
+   * @param options PRD-040: Optional classification options (PC names, etc.)
    * @returns Classification results for each note
    */
-  classifyNotes(notes: NoteForClassification[]): Promise<ClassificationResult[]>;
+  classifyNotes(notes: NoteForClassification[], onProgress?: ProgressCallback, options?: ClassificationOptions): Promise<ClassificationResult[]>;
 
   /**
    * Extract relationships between notes based on their content
    * @param notes Notes with their classifications
+   * @param onProgress PRD-035: Optional callback for progress updates
    * @returns Detected relationships between notes
    */
-  extractRelationships(notes: NoteWithClassification[]): Promise<RelationshipResult[]>;
+  extractRelationships(notes: NoteWithClassification[], onProgress?: ProgressCallback): Promise<RelationshipResult[]>;
+
+  /**
+   * PRD-026: Extract entities from session content using AI
+   * @param content The session log text content
+   * @param existingNotes Optional existing notes for matching
+   * @returns Extracted entities and their relationships
+   */
+  extractEntities(content: string, existingNotes?: NoteReference[]): Promise<EntityExtractionResult>;
 }
 
 /**
@@ -81,3 +101,49 @@ export const CONFIDENCE_THRESHOLDS = {
   REVIEW: 0.65,    // Marked as "Needs review"
   LOW: 0.50,       // Flagged as low confidence
 } as const;
+
+/**
+ * PRD-035: Progress callback for tracking long-running operations
+ */
+export type ProgressCallback = (current: number, total: number, currentItem?: string) => void;
+
+// PRD-026: Entity Extraction Types
+
+/**
+ * Reference to an existing note for context during extraction
+ */
+export interface NoteReference {
+  id: string;
+  title: string;
+  noteType: string;
+}
+
+/**
+ * Entity extracted by AI from session content
+ */
+export interface ExtractedEntity {
+  name: string;
+  type: "npc" | "place" | "quest" | "item" | "faction";
+  confidence: number;
+  mentions: number;
+  context?: string;
+  matchedNoteId?: string;
+}
+
+/**
+ * Relationship between entities detected by AI
+ */
+export interface EntityRelationship {
+  entity1: string;
+  entity2: string;
+  relationship: string;
+  confidence: number;
+}
+
+/**
+ * Result of AI entity extraction
+ */
+export interface EntityExtractionResult {
+  entities: ExtractedEntity[];
+  relationships: EntityRelationship[];
+}

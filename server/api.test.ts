@@ -323,14 +323,14 @@ describe('API Integration Tests', () => {
         .send({
           title: 'Test Note',
           content: 'Some content here',
-          noteType: 'location',
+          noteType: 'area',
           isPrivate: false,
         })
         .expect(200);
 
       expect(res.body.title).toBe('Test Note');
       expect(res.body.content).toBe('Some content here');
-      expect(res.body.noteType).toBe('location');
+      expect(res.body.noteType).toBe('area');
       expect(res.body.authorId).toBe(testUser.id);
     });
 
@@ -387,7 +387,7 @@ describe('API Integration Tests', () => {
     it('should filter private notes by author', async () => {
       await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: 'Public Note', noteType: 'location', isPrivate: false });
+        .send({ title: 'Public Note', noteType: 'area', isPrivate: false });
       
       await request(app)
         .post(`/api/teams/${teamId}/notes`)

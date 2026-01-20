@@ -13,7 +13,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -47,7 +47,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -85,7 +85,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -126,7 +126,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -138,7 +138,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
         },
         {
           id: "entity-2",
-          type: "person",
+          type: "npc",
           text: "Lady Silverwood",
           normalizedText: "lady silverwood",
           confidence: "high",
@@ -167,7 +167,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -188,7 +188,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -199,7 +199,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
 
       const existingNotes = [
         { id: "note-1", title: "Lord Blackwood", noteType: "npc" },
-        { id: "note-2", title: "Silverwood Forest", noteType: "location" },
+        { id: "note-2", title: "Silverwood Forest", noteType: "area" },
       ];
 
       const suggestions = suggestEntityLinks(entities, existingNotes);
@@ -223,8 +223,8 @@ describe("Proximity Suggestions (PRD-006)", () => {
       ];
 
       const existingNotes = [
-        { id: "note-1", title: "Silverwood Forest", noteType: "location" },
-        { id: "note-2", title: "Silverwood Castle", noteType: "location" },
+        { id: "note-1", title: "Silverwood Forest", noteType: "area" },
+        { id: "note-2", title: "Silverwood Castle", noteType: "area" },
       ];
 
       const suggestions = suggestEntityLinks(entities, existingNotes);
@@ -237,7 +237,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -247,8 +247,8 @@ describe("Proximity Suggestions (PRD-006)", () => {
       ];
 
       const existingNotes = [
-        { id: "note-1", title: "Silverwood Forest", noteType: "location" },
-        { id: "note-2", title: "Dragon's Lair", noteType: "location" },
+        { id: "note-1", title: "Silverwood Forest", noteType: "area" },
+        { id: "note-2", title: "Dragon's Lair", noteType: "area" },
       ];
 
       const suggestions = suggestEntityLinks(entities, existingNotes);
@@ -262,7 +262,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
       const entities: DetectedEntity[] = [
         {
           id: "entity-1",
-          type: "person",
+          type: "npc",
           text: "Lord Blackwood",
           normalizedText: "lord blackwood",
           confidence: "high",
@@ -280,7 +280,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
         },
         {
           id: "entity-3",
-          type: "person",
+          type: "npc",
           text: "Lady Silverwood",
           normalizedText: "lady silverwood",
           confidence: "high",
@@ -291,7 +291,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
 
       const groups = groupEntitiesByType(entities);
 
-      expect(groups.get("person")).toHaveLength(2);
+      expect(groups.get("npc")).toHaveLength(2);
       expect(groups.get("place")).toHaveLength(1);
       expect(groups.has("quest")).toBe(false);
     });
@@ -301,7 +301,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
     it("should calculate higher strength for close entities", () => {
       const entity1: DetectedEntity = {
         id: "entity-1",
-        type: "person",
+        type: "npc",
         text: "Lord Blackwood",
         normalizedText: "lord blackwood",
         confidence: "high",
@@ -311,7 +311,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
 
       const entity2Close: DetectedEntity = {
         id: "entity-2",
-        type: "person",
+        type: "npc",
         text: "Lady Silverwood",
         normalizedText: "lady silverwood",
         confidence: "high",
@@ -348,7 +348,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
     it("should increase strength for entities in same blocks", () => {
       const entity1: DetectedEntity = {
         id: "entity-1",
-        type: "person",
+        type: "npc",
         text: "Lord Blackwood",
         normalizedText: "lord blackwood",
         confidence: "high",
@@ -361,7 +361,7 @@ describe("Proximity Suggestions (PRD-006)", () => {
 
       const entitySameBlocks: DetectedEntity = {
         id: "entity-2",
-        type: "person",
+        type: "npc",
         text: "Lady Silverwood",
         normalizedText: "lady silverwood",
         confidence: "high",

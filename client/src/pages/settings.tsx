@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Settings as SettingsIcon,
-  Save,
   Trash2,
   Dices,
   Calendar,
@@ -35,10 +34,12 @@ import {
   User,
   Scroll,
   Download,
+  Sparkles,
 } from "lucide-react";
 import { ImportManagement } from "@/components/import-management";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
+import { useAutosave, type SaveStatus } from "@/hooks/use-autosave";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Team, TeamMember, RecurrenceFrequency, DiceMode, TeamType } from "@shared/schema";
 import { TEAM_TYPE_LABELS, RECURRENCE_FREQUENCIES, DICE_MODES, GAME_TERMINOLOGY } from "@shared/schema";
@@ -50,138 +51,55 @@ interface SettingsPageProps {
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) {
-  const [, navigate] = useLocation();
-  const { toast } = useToast();
-  const { user } = useAuth();
-  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
-  
-  const [formData, setFormData] = useState({
-    name: team.name,
-    recurrenceFrequency: team.recurrenceFrequency || "",
-    dayOfWeek: team.dayOfWeek ?? 6,
-    daysOfMonth: team.daysOfMonth || [],
-    startTime: team.startTime || "19:00",
-    timezone: team.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
-    minAttendanceThreshold: team.minAttendanceThreshold || 2,
-    defaultSessionDurationMinutes: team.defaultSessionDurationMinutes || 180,
-    diceMode: team.diceMode,
-  });
+// Character data type for the character form
+interface CharacterData {
+  characterName: string;
+  characterType1: string;
+  characterType2: string;
+  characterDescription: string;
+}
 
-  // Character form state
-  const [characterData, setCharacterData] = useState({
-    characterName: "",
-    characterType1: "",
-    characterType2: "",
-    characterDescription: "",
-  });
+// Props for the extracted CharacterCard component
+interface CharacterCardProps {
+  characterData: CharacterData;
+  setCharacterData: React.Dispatch<React.SetStateAction<CharacterData>>;
+  isDM: boolean;
+  terminology: typeof GAME_TERMINOLOGY[TeamType];
+  saveStatus: SaveStatus;
+}
 
-  const { data: members } = useQuery<TeamMember[]>({
-    queryKey: ["/api/teams", team.id, "members"],
-    enabled: !!team.id,
-  });
+// Save status display component
+function SaveStatusIndicator({ status }: { status: SaveStatus }) {
+  if (status === "idle") return null;
 
-  const currentMember = members?.find(m => m.userId === user?.id);
-  const isDM = currentMember?.role === "dm";
-  
-  // Check if this is a tabletop gaming group (has character fields)
-  const isTabletopGroup = team.teamType !== "other";
-  const terminology = GAME_TERMINOLOGY[team.teamType as TeamType];
-
-  // Initialize character data from current member
-  useEffect(() => {
-    if (currentMember) {
-      setCharacterData({
-        characterName: currentMember.characterName || "",
-        characterType1: currentMember.characterType1 || "",
-        characterType2: currentMember.characterType2 || "",
-        characterDescription: currentMember.characterDescription || "",
-      });
-    }
-  }, [currentMember]);
-
-  const updateTeamMutation = useMutation({
-    mutationFn: async (data: typeof formData) => {
-      const response = await apiRequest("PATCH", `/api/teams/${team.id}`, {
-        name: data.name,
-        recurrenceFrequency: data.recurrenceFrequency || null,
-        dayOfWeek: data.recurrenceFrequency === "weekly" || data.recurrenceFrequency === "biweekly"
-          ? data.dayOfWeek
-          : null,
-        daysOfMonth: data.recurrenceFrequency === "monthly" ? data.daysOfMonth : null,
-        startTime: data.startTime,
-        timezone: data.timezone,
-        minAttendanceThreshold: data.minAttendanceThreshold,
-        defaultSessionDurationMinutes: data.defaultSessionDurationMinutes,
-        diceMode: data.diceMode,
-      });
-      return response.json();
-    },
-    onSuccess: (updatedTeam) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
-      onTeamUpdate(updatedTeam);
-      toast({ title: "Settings saved", description: "Your team settings have been updated." });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to save", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const deleteTeamMutation = useMutation({
-    mutationFn: async () => {
-      await apiRequest("DELETE", `/api/teams/${team.id}`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
-      toast({ title: "Team deleted" });
-      navigate("/");
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to delete", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const updateCharacterMutation = useMutation({
-    mutationFn: async (data: typeof characterData) => {
-      if (!currentMember) throw new Error("Not a team member");
-      const response = await apiRequest("PATCH", `/api/teams/${team.id}/members/${currentMember.id}`, data);
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "members"] });
-      toast({ title: "Character saved", description: "Your character information has been updated." });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to save character", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const hasCharacterChanged = currentMember && (
-    characterData.characterName !== (currentMember.characterName || "") ||
-    characterData.characterType1 !== (currentMember.characterType1 || "") ||
-    characterData.characterType2 !== (currentMember.characterType2 || "") ||
-    characterData.characterDescription !== (currentMember.characterDescription || "")
+  return (
+    <span className="text-sm text-muted-foreground" data-testid="save-status">
+      {status === "pending" && "Unsaved changes..."}
+      {status === "saving" && "Saving..."}
+      {status === "saved" && "Saved"}
+      {status === "error" && <span className="text-destructive">Save failed</span>}
+    </span>
   );
+}
 
-  const toggleDayOfMonth = (day: number) => {
-    setFormData(prev => ({
-      ...prev,
-      daysOfMonth: prev.daysOfMonth.includes(day)
-        ? prev.daysOfMonth.filter(d => d !== day)
-        : [...prev.daysOfMonth, day].sort((a, b) => a - b)
-    }));
-  };
-
-  // Character Card component - shared between DM and member views
-  const CharacterCard = () => (
+// Extracted to module scope to prevent focus loss on re-render
+function CharacterCard({
+  characterData,
+  setCharacterData,
+  isDM,
+  terminology,
+  saveStatus,
+}: CharacterCardProps) {
+  return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <User className="h-5 w-5" />
           My Character
+          <SaveStatusIndicator status={saveStatus} />
         </CardTitle>
         <CardDescription>
-          {isDM 
+          {isDM
             ? `As the ${terminology.gmTitle}, you can optionally track your character or NPC here.`
             : "Set up your character information for this campaign."
           }
@@ -236,18 +154,152 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
             data-testid="input-character-description"
           />
         </div>
-
-        <Button
-          onClick={() => updateCharacterMutation.mutate(characterData)}
-          disabled={!hasCharacterChanged || updateCharacterMutation.isPending}
-          data-testid="button-save-character"
-        >
-          <Save className="h-4 w-4 mr-2" />
-          {updateCharacterMutation.isPending ? "Saving..." : "Save Character"}
-        </Button>
       </CardContent>
     </Card>
   );
+}
+
+export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) {
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
+  const { user } = useAuth();
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  
+  const [formData, setFormData] = useState({
+    name: team.name,
+    recurrenceFrequency: team.recurrenceFrequency || "",
+    dayOfWeek: team.dayOfWeek ?? 6,
+    daysOfMonth: team.daysOfMonth || [],
+    startTime: team.startTime || "19:00",
+    timezone: team.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    minAttendanceThreshold: team.minAttendanceThreshold || 2,
+    defaultSessionDurationMinutes: team.defaultSessionDurationMinutes || 180,
+    diceMode: team.diceMode,
+  });
+
+  // Character form state
+  const [characterData, setCharacterData] = useState({
+    characterName: "",
+    characterType1: "",
+    characterType2: "",
+    characterDescription: "",
+  });
+
+  const { data: members } = useQuery<TeamMember[]>({
+    queryKey: ["/api/teams", team.id, "members"],
+    enabled: !!team.id,
+  });
+
+  const currentMember = members?.find(m => m.userId === user?.id);
+  const isDM = currentMember?.role === "dm";
+  
+  // Check if this is a tabletop gaming group (has character fields)
+  const isTabletopGroup = team.teamType !== "other";
+  const terminology = GAME_TERMINOLOGY[team.teamType as TeamType];
+
+  // Initialize character data from current member
+  useEffect(() => {
+    if (currentMember) {
+      setCharacterData({
+        characterName: currentMember.characterName || "",
+        characterType1: currentMember.characterType1 || "",
+        characterType2: currentMember.characterType2 || "",
+        characterDescription: currentMember.characterDescription || "",
+      });
+    }
+  }, [currentMember]);
+
+  // PRD-032: Auto-save team settings
+  const { status: teamSaveStatus } = useAutosave({
+    data: formData,
+    onSave: async (data) => {
+      try {
+        const response = await apiRequest("PATCH", `/api/teams/${team.id}`, {
+          name: data.name,
+          recurrenceFrequency: data.recurrenceFrequency || null,
+          dayOfWeek: data.recurrenceFrequency === "weekly" || data.recurrenceFrequency === "biweekly"
+            ? data.dayOfWeek
+            : null,
+          daysOfMonth: data.recurrenceFrequency === "monthly" ? data.daysOfMonth : null,
+          startTime: data.startTime,
+          timezone: data.timezone,
+          minAttendanceThreshold: data.minAttendanceThreshold,
+          defaultSessionDurationMinutes: data.defaultSessionDurationMinutes,
+          diceMode: data.diceMode,
+        });
+        const updatedTeam = await response.json();
+        queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
+        onTeamUpdate(updatedTeam);
+      } catch (error) {
+        toast({ title: "Failed to save", description: (error as Error).message, variant: "destructive" });
+        throw error;
+      }
+    },
+    debounceMs: 500,
+    enabled: isDM,
+  });
+
+  const deleteTeamMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("DELETE", `/api/teams/${team.id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
+      toast({ title: "Team deleted" });
+      navigate("/");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to delete", description: error.message, variant: "destructive" });
+    },
+  });
+
+  // PRD-032: Auto-save character data
+  const { status: charSaveStatus } = useAutosave({
+    data: characterData,
+    onSave: async (data) => {
+      if (!currentMember) return;
+      try {
+        await apiRequest("PATCH", `/api/teams/${team.id}/members/${currentMember.id}`, data);
+        queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "members"] });
+      } catch (error) {
+        toast({ title: "Failed to save character", description: (error as Error).message, variant: "destructive" });
+        throw error;
+      }
+    },
+    debounceMs: 500,
+    enabled: !!currentMember,
+  });
+
+  // PRD-028: Per-member AI Features toggle mutation
+  const toggleMemberAIMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      if (!currentMember) throw new Error("Not a team member");
+      const response = await apiRequest("PATCH", `/api/teams/${team.id}/members/${currentMember.id}`, {
+        aiEnabled: enabled,
+        aiEnabledAt: enabled ? new Date().toISOString() : null,
+      });
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "members"] });
+      toast({
+        title: "AI Features Updated",
+        description: "Your AI feature settings have been saved.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to update AI settings", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const toggleDayOfMonth = (day: number) => {
+    setFormData(prev => ({
+      ...prev,
+      daysOfMonth: prev.daysOfMonth.includes(day)
+        ? prev.daysOfMonth.filter(d => d !== day)
+        : [...prev.daysOfMonth, day].sort((a, b) => a - b)
+    }));
+  };
 
   // Non-DM view: show character settings only
   if (!isDM) {
@@ -261,8 +313,16 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
         </div>
 
         <div className="space-y-6">
-          {isTabletopGroup && <CharacterCard />}
-          
+          {isTabletopGroup && (
+            <CharacterCard
+              characterData={characterData}
+              setCharacterData={setCharacterData}
+              isDM={isDM}
+              terminology={terminology}
+              saveStatus={charSaveStatus}
+            />
+          )}
+
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -280,6 +340,45 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
                 {team.recurrenceFrequency && (
                   <p><strong>Schedule:</strong> {team.recurrenceFrequency} on {WEEKDAYS[team.dayOfWeek || 0]}s at {team.startTime}</p>
                 )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* PRD-028: AI Features for all members */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5" />
+                AI Features
+              </CardTitle>
+              <CardDescription>
+                Enable AI-powered enhancements for your note-taking
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ai-toggle-member">Enable AI Features</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Unlock intelligent features powered by Claude AI
+                  </p>
+                </div>
+                <Switch
+                  id="ai-toggle-member"
+                  checked={currentMember?.aiEnabled ?? false}
+                  onCheckedChange={(checked) => toggleMemberAIMutation.mutate(checked)}
+                  disabled={toggleMemberAIMutation.isPending}
+                  data-testid="switch-ai-features-member"
+                />
+              </div>
+              <div className="rounded-lg bg-muted p-4 text-sm">
+                <p className="font-medium mb-2">AI features include:</p>
+                <ul className="space-y-1 text-muted-foreground">
+                  <li>• <strong>AI Cleanup</strong> — Enhanced entity detection with context-aware recognition</li>
+                  <li>• <strong>Relationship Detection</strong> — Discover connections between NPCs, places, and factions</li>
+                  <li>• <strong>Note Classification</strong> — Automatic note type suggestions</li>
+                  <li>• <strong>Entity Enrichment</strong> — AI-generated descriptions for your world</li>
+                </ul>
               </div>
             </CardContent>
           </Card>
@@ -493,7 +592,15 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
           </CardContent>
         </Card>
 
-        {isTabletopGroup && <CharacterCard />}
+        {isTabletopGroup && (
+          <CharacterCard
+            characterData={characterData}
+            setCharacterData={setCharacterData}
+            isDM={isDM}
+            terminology={terminology}
+            saveStatus={charSaveStatus}
+          />
+        )}
 
         {/* PRD-015A: Import History */}
         <Card>
@@ -515,6 +622,45 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
           </CardContent>
         </Card>
 
+        {/* PRD-028: AI Features for all members */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5" />
+              AI Features
+            </CardTitle>
+            <CardDescription>
+              Enable AI-powered enhancements for your note-taking
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="ai-toggle-dm">Enable AI Features</Label>
+                <p className="text-sm text-muted-foreground">
+                  Unlock intelligent features powered by Claude AI
+                </p>
+              </div>
+              <Switch
+                id="ai-toggle-dm"
+                checked={currentMember?.aiEnabled ?? false}
+                onCheckedChange={(checked) => toggleMemberAIMutation.mutate(checked)}
+                disabled={toggleMemberAIMutation.isPending}
+                data-testid="switch-ai-features"
+              />
+            </div>
+            <div className="rounded-lg bg-muted p-4 text-sm">
+              <p className="font-medium mb-2">AI features include:</p>
+              <ul className="space-y-1 text-muted-foreground">
+                <li>• <strong>AI Cleanup</strong> — Enhanced entity detection with context-aware recognition</li>
+                <li>• <strong>Relationship Detection</strong> — Discover connections between NPCs, places, and factions</li>
+                <li>• <strong>Note Classification</strong> — Automatic note type suggestions</li>
+                <li>• <strong>Entity Enrichment</strong> — AI-generated descriptions for your world</li>
+              </ul>
+            </div>
+          </CardContent>
+        </Card>
+
         <div className="flex items-center justify-between pt-4">
           <Button
             variant="destructive"
@@ -524,14 +670,7 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
             <Trash2 className="h-4 w-4 mr-2" />
             Delete Team
           </Button>
-          <Button
-            onClick={() => updateTeamMutation.mutate(formData)}
-            disabled={updateTeamMutation.isPending}
-            data-testid="button-save-settings"
-          >
-            <Save className="h-4 w-4 mr-2" />
-            {updateTeamMutation.isPending ? "Saving..." : "Save Changes"}
-          </Button>
+          <SaveStatusIndicator status={teamSaveStatus} />
         </div>
       </div>
 

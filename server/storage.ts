@@ -15,10 +15,12 @@ import {
   enrichmentRuns, EnrichmentRun, InsertEnrichmentRun, EnrichmentStatus,
   noteClassifications, NoteClassification, InsertNoteClassification, ClassificationStatus,
   noteRelationships, NoteRelationship, InsertNoteRelationship,
+  // PRD-043: AI Cache
+  aiCacheEntries, AICacheEntry, InsertAICacheEntry, AICacheStats,
   users
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, gte, lte } from "drizzle-orm";
+import { eq, and, desc, gte, lte, lt, sql, inArray, count as drizzleCount } from "drizzle-orm";
 
 import type { User } from "@shared/schema";
 
@@ -38,7 +40,7 @@ export interface IStorage {
   getTeamMembers(teamId: string): Promise<(TeamMember & { user?: { firstName?: string | null; lastName?: string | null; profileImageUrl?: string | null; email?: string | null } })[]>;
   getTeamMember(teamId: string, userId: string): Promise<TeamMember | undefined>;
   createTeamMember(member: InsertTeamMember): Promise<TeamMember>;
-  updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null }): Promise<TeamMember>;
+  updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null; aiEnabled?: boolean; aiEnabledAt?: Date | null }): Promise<TeamMember>;
   deleteTeamMember(id: string): Promise<void>;
 
   // Invites
@@ -54,6 +56,8 @@ export interface IStorage {
   updateNote(id: string, data: Partial<InsertNote>): Promise<Note>;
   deleteNote(id: string): Promise<void>;
   getSessionLogs(teamId: string): Promise<Note[]>;
+  // PRD-019: Find session by date for today's session editor
+  findSessionByDate(teamId: string, date: Date): Promise<Note | undefined>;
   // PRD-015: Import methods
   findNoteBySourceId(teamId: string, sourceSystem: string, sourcePageId: string): Promise<Note | undefined>;
   upsertImportedNote(note: InsertNote): Promise<{ note: Note; created: boolean }>;
@@ -134,6 +138,41 @@ export interface IStorage {
   updateNoteRelationshipStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteRelationship>;
   bulkUpdateRelationshipStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number>;
   deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void>;
+
+  // PRD-037: Low-confidence classifications review
+  getPendingLowConfidenceClassifications(teamId: string): Promise<NeedsReviewItem[]>;
+
+  // PRD-043: AI Cache
+  getAICacheEntry(
+    cacheType: string,
+    contentHash: string,
+    algorithmVersion: string,
+    contextHash?: string,
+    teamId?: string
+  ): Promise<AICacheEntry | null>;
+  setAICacheEntry(entry: InsertAICacheEntry): Promise<AICacheEntry>;
+  getAICacheEntriesBatch(
+    cacheType: string,
+    contentHashes: string[],
+    algorithmVersion: string,
+    contextHash?: string,
+    teamId?: string
+  ): Promise<AICacheEntry[]>;
+  incrementAICacheHitCount(id: string): Promise<void>;
+  deleteAICacheByVersion(operationType: string, version: string): Promise<number>;
+  deleteAICacheByTeam(teamId: string): Promise<number>;
+  deleteExpiredAICacheEntries(): Promise<number>;
+  getAICacheStats(): Promise<AICacheStats>;
+}
+
+// PRD-037: Type for needs-review items
+export interface NeedsReviewItem {
+  classificationId: string;
+  noteId: string;
+  noteTitle: string;
+  inferredType: NoteClassification["inferredType"];
+  confidence: number;
+  explanation: string | null;
 }
 
 function generateInviteCode(): string {
@@ -238,7 +277,7 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
-  async updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null }): Promise<TeamMember> {
+  async updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null; aiEnabled?: boolean; aiEnabledAt?: Date | null }): Promise<TeamMember> {
     const [updated] = await db
       .update(teamMembers)
       .set(data)
@@ -319,6 +358,28 @@ export class DatabaseStorage implements IStorage {
       .from(notes)
       .where(and(eq(notes.teamId, teamId), eq(notes.noteType, "session_log")))
       .orderBy(desc(notes.sessionDate));
+  }
+
+  // PRD-019: Find session by date for today's session editor
+  async findSessionByDate(teamId: string, date: Date): Promise<Note | undefined> {
+    const startOfDay = new Date(date);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(date);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const [session] = await db
+      .select()
+      .from(notes)
+      .where(
+        and(
+          eq(notes.teamId, teamId),
+          eq(notes.noteType, "session_log"),
+          gte(notes.sessionDate, startOfDay),
+          lte(notes.sessionDate, endOfDay)
+        )
+      )
+      .limit(1);
+    return session;
   }
 
   // PRD-015: Import methods
@@ -836,6 +897,198 @@ export class DatabaseStorage implements IStorage {
 
   async deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void> {
     await db.delete(noteRelationships).where(eq(noteRelationships.enrichmentRunId, enrichmentRunId));
+  }
+
+  // PRD-037: Get pending low-confidence classifications for review
+  async getPendingLowConfidenceClassifications(teamId: string): Promise<NeedsReviewItem[]> {
+    const CONFIDENCE_THRESHOLD = 0.65;
+    const results = await db
+      .select({
+        classificationId: noteClassifications.id,
+        noteId: noteClassifications.noteId,
+        noteTitle: notes.title,
+        inferredType: noteClassifications.inferredType,
+        confidence: noteClassifications.confidence,
+        explanation: noteClassifications.explanation,
+      })
+      .from(noteClassifications)
+      .innerJoin(notes, eq(noteClassifications.noteId, notes.id))
+      .where(
+        and(
+          eq(notes.teamId, teamId),
+          eq(noteClassifications.status, "pending"),
+          lt(noteClassifications.confidence, CONFIDENCE_THRESHOLD)
+        )
+      )
+      .orderBy(noteClassifications.confidence);
+
+    return results;
+  }
+
+  // PRD-043: AI Cache methods
+  async getAICacheEntry(
+    cacheType: string,
+    contentHash: string,
+    algorithmVersion: string,
+    contextHash?: string,
+    teamId?: string
+  ): Promise<AICacheEntry | null> {
+    const conditions = [
+      eq(aiCacheEntries.cacheType, cacheType as "classification" | "relationship"),
+      eq(aiCacheEntries.contentHash, contentHash),
+      eq(aiCacheEntries.algorithmVersion, algorithmVersion),
+    ];
+
+    if (contextHash !== undefined) {
+      conditions.push(eq(aiCacheEntries.contextHash, contextHash));
+    }
+
+    if (teamId !== undefined) {
+      conditions.push(eq(aiCacheEntries.teamId, teamId));
+    }
+
+    const [entry] = await db
+      .select()
+      .from(aiCacheEntries)
+      .where(and(...conditions))
+      .limit(1);
+
+    return entry || null;
+  }
+
+  async setAICacheEntry(entry: InsertAICacheEntry): Promise<AICacheEntry> {
+    // Try to upsert - if entry with same key exists, update it
+    const existing = await this.getAICacheEntry(
+      entry.cacheType,
+      entry.contentHash,
+      entry.algorithmVersion,
+      entry.contextHash ?? undefined,
+      entry.teamId
+    );
+
+    if (existing) {
+      const [updated] = await db
+        .update(aiCacheEntries)
+        .set({
+          result: entry.result,
+          modelId: entry.modelId,
+          tokensSaved: entry.tokensSaved,
+          expiresAt: entry.expiresAt,
+        })
+        .where(eq(aiCacheEntries.id, existing.id))
+        .returning();
+      return updated;
+    }
+
+    const [created] = await db
+      .insert(aiCacheEntries)
+      .values(entry as typeof aiCacheEntries.$inferInsert)
+      .returning();
+    return created;
+  }
+
+  async getAICacheEntriesBatch(
+    cacheType: string,
+    contentHashes: string[],
+    algorithmVersion: string,
+    contextHash?: string,
+    teamId?: string
+  ): Promise<AICacheEntry[]> {
+    if (contentHashes.length === 0) {
+      return [];
+    }
+
+    const conditions = [
+      eq(aiCacheEntries.cacheType, cacheType as "classification" | "relationship"),
+      inArray(aiCacheEntries.contentHash, contentHashes),
+      eq(aiCacheEntries.algorithmVersion, algorithmVersion),
+    ];
+
+    if (contextHash !== undefined) {
+      conditions.push(eq(aiCacheEntries.contextHash, contextHash));
+    }
+
+    if (teamId !== undefined) {
+      conditions.push(eq(aiCacheEntries.teamId, teamId));
+    }
+
+    return await db
+      .select()
+      .from(aiCacheEntries)
+      .where(and(...conditions));
+  }
+
+  async incrementAICacheHitCount(id: string): Promise<void> {
+    await db
+      .update(aiCacheEntries)
+      .set({
+        hitCount: sql`COALESCE(${aiCacheEntries.hitCount}, 0) + 1`,
+        lastHitAt: new Date(),
+      })
+      .where(eq(aiCacheEntries.id, id));
+  }
+
+  async deleteAICacheByVersion(operationType: string, version: string): Promise<number> {
+    const result = await db
+      .delete(aiCacheEntries)
+      .where(
+        and(
+          eq(aiCacheEntries.cacheType, operationType as "classification" | "relationship"),
+          eq(aiCacheEntries.algorithmVersion, version)
+        )
+      )
+      .returning();
+    return result.length;
+  }
+
+  async deleteAICacheByTeam(teamId: string): Promise<number> {
+    const result = await db
+      .delete(aiCacheEntries)
+      .where(eq(aiCacheEntries.teamId, teamId))
+      .returning();
+    return result.length;
+  }
+
+  async deleteExpiredAICacheEntries(): Promise<number> {
+    const result = await db
+      .delete(aiCacheEntries)
+      .where(lt(aiCacheEntries.expiresAt, new Date()))
+      .returning();
+    return result.length;
+  }
+
+  async getAICacheStats(): Promise<AICacheStats> {
+    // Get total entries and counts by type
+    const allEntries = await db.select().from(aiCacheEntries);
+
+    const classificationCount = allEntries.filter(e => e.cacheType === "classification").length;
+    const relationshipCount = allEntries.filter(e => e.cacheType === "relationship").length;
+    const totalHits = allEntries.reduce((sum, e) => sum + (e.hitCount || 0), 0);
+
+    // Get oldest and newest entries
+    const sortedByCreated = [...allEntries].sort(
+      (a, b) => new Date(a.createdAt!).getTime() - new Date(b.createdAt!).getTime()
+    );
+    const oldestEntry = sortedByCreated[0]?.createdAt || null;
+    const newestEntry = sortedByCreated[sortedByCreated.length - 1]?.createdAt || null;
+
+    // Count entries expiring within 7 days
+    const sevenDaysFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const entriesExpiringSoon = allEntries.filter(
+      e => e.expiresAt && new Date(e.expiresAt) < sevenDaysFromNow
+    ).length;
+
+    return {
+      totalEntries: allEntries.length,
+      entriesByType: {
+        classification: classificationCount,
+        relationship: relationshipCount,
+      },
+      totalHits,
+      oldestEntry,
+      newestEntry,
+      entriesExpiringSoon,
+    };
   }
 }
 

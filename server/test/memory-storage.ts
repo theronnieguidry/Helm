@@ -1,4 +1,4 @@
-import type { IStorage } from "../storage";
+import type { IStorage, NeedsReviewItem } from "../storage";
 import {
   TEAM_TYPES, DICE_MODES, RECURRENCE_FREQUENCIES, NOTE_TYPES, AVAILABILITY_STATUS, QUEST_STATUSES, SESSION_STATUSES, IMPORT_RUN_STATUSES,
   ENRICHMENT_STATUSES, CLASSIFICATION_STATUSES, INFERRED_ENTITY_TYPES, RELATIONSHIP_TYPES, EVIDENCE_TYPES,
@@ -21,6 +21,8 @@ import {
   type NoteRelationship, type InsertNoteRelationship,
   type InferredEntityType, type RelationshipType, type EvidenceType,
   type EnrichmentRunTotals,
+  // PRD-043: AI Cache types
+  type AICacheEntry, type InsertAICacheEntry, type AICacheStats, type AICacheType,
   type User,
   type TeamType,
   type DiceMode,
@@ -152,6 +154,8 @@ export class MemoryStorage implements IStorage {
   private enrichmentRunsMap: Map<string, EnrichmentRun> = new Map();
   private noteClassificationsMap: Map<string, NoteClassification> = new Map();
   private noteRelationshipsMap: Map<string, NoteRelationship> = new Map();
+  // PRD-043: AI Cache
+  private aiCacheEntriesMap: Map<string, AICacheEntry> = new Map();
 
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
@@ -200,6 +204,9 @@ export class MemoryStorage implements IStorage {
       recurrenceAnchorDate: null,
       minAttendanceThreshold: 2,
       defaultSessionDurationMinutes: 180,
+      // PRD-027: AI Features paywall
+      aiEnabled: team.aiEnabled ?? false,
+      aiEnabledAt: team.aiEnabledAt ?? null,
       createdAt: new Date(),
     };
     this.teams.set(id, newTeam);
@@ -271,13 +278,16 @@ export class MemoryStorage implements IStorage {
       characterType1: member.characterType1 ?? null,
       characterType2: member.characterType2 ?? null,
       characterDescription: member.characterDescription ?? null,
+      // PRD-028: Per-member AI features
+      aiEnabled: member.aiEnabled ?? false,
+      aiEnabledAt: member.aiEnabledAt ?? null,
       joinedAt: new Date(),
     };
     this.teamMembers.set(id, newMember);
     return newMember;
   }
 
-  async updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null }): Promise<TeamMember> {
+  async updateTeamMember(id: string, data: { characterName?: string | null; characterType1?: string | null; characterType2?: string | null; characterDescription?: string | null; aiEnabled?: boolean; aiEnabledAt?: Date | null }): Promise<TeamMember> {
     const member = this.teamMembers.get(id);
     if (!member) throw new Error("Team member not found");
     const updated = { ...member, ...data };
@@ -390,6 +400,22 @@ export class MemoryStorage implements IStorage {
         const dateB = b.sessionDate?.getTime() ?? 0;
         return dateB - dateA;
       });
+  }
+
+  // PRD-019: Find session by date for today's session editor
+  async findSessionByDate(teamId: string, date: Date): Promise<Note | undefined> {
+    const startOfDay = new Date(date);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(date);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    return Array.from(this.notes.values()).find(
+      n => n.teamId === teamId &&
+        n.noteType === "session_log" &&
+        n.sessionDate &&
+        n.sessionDate >= startOfDay &&
+        n.sessionDate <= endOfDay
+    );
   }
 
   // PRD-015: Import methods
@@ -964,6 +990,194 @@ export class MemoryStorage implements IStorage {
     }
   }
 
+  // PRD-037: Get pending low-confidence classifications for review
+  async getPendingLowConfidenceClassifications(teamId: string): Promise<NeedsReviewItem[]> {
+    const CONFIDENCE_THRESHOLD = 0.65;
+    const results: NeedsReviewItem[] = [];
+
+    for (const classification of Array.from(this.noteClassificationsMap.values())) {
+      if (classification.status !== "pending" || classification.confidence >= CONFIDENCE_THRESHOLD) {
+        continue;
+      }
+      const note = this.notes.get(classification.noteId);
+      if (!note || note.teamId !== teamId) {
+        continue;
+      }
+      results.push({
+        classificationId: classification.id,
+        noteId: classification.noteId,
+        noteTitle: note.title,
+        inferredType: classification.inferredType,
+        confidence: classification.confidence,
+        explanation: classification.explanation,
+      });
+    }
+
+    // Sort by confidence ascending (lowest first)
+    return results.sort((a, b) => a.confidence - b.confidence);
+  }
+
+  // PRD-043: AI Cache methods
+  async getAICacheEntry(
+    cacheType: string,
+    contentHash: string,
+    algorithmVersion: string,
+    contextHash?: string,
+    teamId?: string
+  ): Promise<AICacheEntry | null> {
+    for (const entry of Array.from(this.aiCacheEntriesMap.values())) {
+      if (
+        entry.cacheType === cacheType &&
+        entry.contentHash === contentHash &&
+        entry.algorithmVersion === algorithmVersion &&
+        (contextHash === undefined || entry.contextHash === contextHash) &&
+        (teamId === undefined || entry.teamId === teamId)
+      ) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  async setAICacheEntry(entry: InsertAICacheEntry): Promise<AICacheEntry> {
+    // Check for existing entry with same key
+    const existing = await this.getAICacheEntry(
+      entry.cacheType,
+      entry.contentHash,
+      entry.algorithmVersion,
+      entry.contextHash ?? undefined,
+      entry.teamId
+    );
+
+    if (existing) {
+      const updated: AICacheEntry = {
+        ...existing,
+        result: entry.result,
+        modelId: entry.modelId,
+        tokensSaved: entry.tokensSaved ?? null,
+        expiresAt: entry.expiresAt ?? null,
+      };
+      this.aiCacheEntriesMap.set(existing.id, updated);
+      return updated;
+    }
+
+    const id = generateId();
+    const newEntry: AICacheEntry = {
+      id,
+      cacheType: entry.cacheType as AICacheType,
+      contentHash: entry.contentHash,
+      algorithmVersion: entry.algorithmVersion,
+      contextHash: entry.contextHash ?? null,
+      teamId: entry.teamId,
+      result: entry.result,
+      modelId: entry.modelId,
+      tokensSaved: entry.tokensSaved ?? null,
+      hitCount: 0,
+      createdAt: new Date(),
+      lastHitAt: null,
+      expiresAt: entry.expiresAt ?? null,
+    };
+    this.aiCacheEntriesMap.set(id, newEntry);
+    return newEntry;
+  }
+
+  async getAICacheEntriesBatch(
+    cacheType: string,
+    contentHashes: string[],
+    algorithmVersion: string,
+    contextHash?: string,
+    teamId?: string
+  ): Promise<AICacheEntry[]> {
+    if (contentHashes.length === 0) {
+      return [];
+    }
+
+    return Array.from(this.aiCacheEntriesMap.values()).filter(entry =>
+      entry.cacheType === cacheType &&
+      contentHashes.includes(entry.contentHash) &&
+      entry.algorithmVersion === algorithmVersion &&
+      (contextHash === undefined || entry.contextHash === contextHash) &&
+      (teamId === undefined || entry.teamId === teamId)
+    );
+  }
+
+  async incrementAICacheHitCount(id: string): Promise<void> {
+    const entry = this.aiCacheEntriesMap.get(id);
+    if (entry) {
+      const updated = {
+        ...entry,
+        hitCount: (entry.hitCount || 0) + 1,
+        lastHitAt: new Date(),
+      };
+      this.aiCacheEntriesMap.set(id, updated);
+    }
+  }
+
+  async deleteAICacheByVersion(operationType: string, version: string): Promise<number> {
+    let count = 0;
+    for (const [id, entry] of Array.from(this.aiCacheEntriesMap.entries())) {
+      if (entry.cacheType === operationType && entry.algorithmVersion === version) {
+        this.aiCacheEntriesMap.delete(id);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async deleteAICacheByTeam(teamId: string): Promise<number> {
+    let count = 0;
+    for (const [id, entry] of Array.from(this.aiCacheEntriesMap.entries())) {
+      if (entry.teamId === teamId) {
+        this.aiCacheEntriesMap.delete(id);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async deleteExpiredAICacheEntries(): Promise<number> {
+    const now = new Date();
+    let count = 0;
+    for (const [id, entry] of Array.from(this.aiCacheEntriesMap.entries())) {
+      if (entry.expiresAt && new Date(entry.expiresAt) < now) {
+        this.aiCacheEntriesMap.delete(id);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async getAICacheStats(): Promise<AICacheStats> {
+    const allEntries = Array.from(this.aiCacheEntriesMap.values());
+
+    const classificationCount = allEntries.filter(e => e.cacheType === "classification").length;
+    const relationshipCount = allEntries.filter(e => e.cacheType === "relationship").length;
+    const totalHits = allEntries.reduce((sum, e) => sum + (e.hitCount || 0), 0);
+
+    const sortedByCreated = [...allEntries].sort(
+      (a, b) => new Date(a.createdAt!).getTime() - new Date(b.createdAt!).getTime()
+    );
+    const oldestEntry = sortedByCreated[0]?.createdAt || null;
+    const newestEntry = sortedByCreated[sortedByCreated.length - 1]?.createdAt || null;
+
+    const sevenDaysFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const entriesExpiringSoon = allEntries.filter(
+      e => e.expiresAt && new Date(e.expiresAt) < sevenDaysFromNow
+    ).length;
+
+    return {
+      totalEntries: allEntries.length,
+      entriesByType: {
+        classification: classificationCount,
+        relationship: relationshipCount,
+      },
+      totalHits,
+      oldestEntry,
+      newestEntry,
+      entriesExpiringSoon,
+    };
+  }
+
   clear(): void {
     this.users.clear();
     this.teams.clear();
@@ -982,5 +1196,7 @@ export class MemoryStorage implements IStorage {
     this.enrichmentRunsMap.clear();
     this.noteClassificationsMap.clear();
     this.noteRelationshipsMap.clear();
+    // PRD-043: AI Cache
+    this.aiCacheEntriesMap.clear();
   }
 }

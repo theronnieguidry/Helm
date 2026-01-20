@@ -2,12 +2,38 @@
  * @vitest-environment jsdom
  */
 import '@testing-library/jest-dom';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { render, screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import NotesPage from './notes';
 import { format } from 'date-fns';
+
+// Mock ResizeObserver for jsdom
+class MockResizeObserver {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+}
+
+beforeAll(() => {
+  vi.stubGlobal('ResizeObserver', MockResizeObserver);
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
+
+// Mock ResizablePanelGroup to avoid jsdom issues with resize observers
+vi.mock('@/components/ui/resizable', () => ({
+  ResizablePanelGroup: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="resizable-panel-group">{children}</div>
+  ),
+  ResizablePanel: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="resizable-panel">{children}</div>
+  ),
+  ResizableHandle: () => <div data-testid="resizable-handle" />,
+}));
 
 // Mock wouter
 vi.mock('wouter', () => ({
@@ -36,6 +62,31 @@ vi.mock('@/lib/queryClient', () => ({
   apiRequest: (...args: unknown[]) => mockApiRequest(...args),
 }));
 
+// Mock entity detection hook (uses Web Worker which isn't available in jsdom)
+vi.mock('@/hooks/use-entity-detection', () => ({
+  useEntityDetection: () => ({
+    entities: [],
+    isLoading: false,
+    error: null,
+  }),
+}));
+
+// Mock suggestion persistence hook
+vi.mock('@/hooks/use-suggestion-persistence', () => ({
+  useSuggestionPersistence: () => ({
+    dismissed: new Set(),
+    reclassified: new Map(),
+    created: new Set(),
+    dismissEntity: vi.fn(),
+    reclassifyEntity: vi.fn(),
+    markCreated: vi.fn(),
+    isDismissed: () => false,
+    getReclassifiedType: () => undefined,
+    isCreated: () => false,
+    clearSession: vi.fn(),
+  }),
+}));
+
 const mockTeam = {
   id: 'team-1',
   name: 'Test Team',
@@ -44,6 +95,17 @@ const mockTeam = {
   ownerId: 'user-1',
   inviteCode: 'ABC123',
   createdAt: new Date(),
+  recurrenceFrequency: null,
+  dayOfWeek: null,
+  daysOfMonth: null,
+  startTime: null,
+  endTime: null,
+  timezone: null,
+  availabilityStartDate: null,
+  availabilityEndDate: null,
+  recurrenceAnchorDate: null,
+  minAttendanceThreshold: null,
+  defaultSessionDurationMinutes: null,
 };
 
 const mockNotes = [
@@ -65,7 +127,7 @@ const mockNotes = [
     authorId: 'user-1',
     title: 'Tavern of the Rusty Blade',
     content: 'A seedy establishment...',
-    noteType: 'location',
+    noteType: 'area',
     isPrivate: false,
     sessionDate: null,
     createdAt: '2024-01-10T12:00:00.000Z',
@@ -83,6 +145,18 @@ const mockNotes = [
     sessionDate: null,
     createdAt: '2024-01-12T12:00:00.000Z',
     updatedAt: '2024-01-12T12:00:00.000Z',
+  },
+  {
+    id: 'note-4',
+    teamId: 'team-1',
+    authorId: 'user-1',
+    title: 'Gandalf the Grey',
+    content: 'A mysterious wizard...',
+    noteType: 'npc',
+    isPrivate: false,
+    sessionDate: null,
+    createdAt: '2024-01-08T12:00:00.000Z',
+    updatedAt: '2024-01-08T12:00:00.000Z',
   },
 ];
 
@@ -104,7 +178,7 @@ function renderWithProviders(ui: React.ReactElement) {
   );
 }
 
-describe('NotesPage - Unified Sessions View (PRD-008)', () => {
+describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockApiRequest.mockResolvedValue({
@@ -112,242 +186,250 @@ describe('NotesPage - Unified Sessions View (PRD-008)', () => {
     });
   });
 
-  describe('FR-1: Unified View (No Tabs)', () => {
-    it('should NOT display Notes/Session Logs tabs', () => {
+  describe('Layout Structure', () => {
+    it('should render two-panel layout with resizable panels', () => {
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      // Tabs should not exist
-      expect(screen.queryByTestId('tab-notes')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('tab-sessions')).not.toBeInTheDocument();
+      expect(screen.getByTestId('resizable-panel-group')).toBeInTheDocument();
+      expect(screen.getAllByTestId('resizable-panel')).toHaveLength(2);
     });
 
-    it('should display all notes together (session logs and entity notes)', () => {
+    it('should display page header with "Notes" title', () => {
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      // All notes should be visible
+      // Header shows "Notes" (changed from "Sessions" per PRD-019)
+      expect(screen.getByRole('heading', { name: 'Notes', level: 1 })).toBeInTheDocument();
+    });
+
+    it('should display Import button in header', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      expect(screen.getByRole('button', { name: /import/i })).toBeInTheDocument();
+    });
+  });
+
+  describe('Left Panel - Filter Categories', () => {
+    it('should display accordion sections for each category', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Check for accordion category headers
+      expect(screen.getByText('Sessions')).toBeInTheDocument();
+      expect(screen.getByText('People')).toBeInTheDocument();
+      expect(screen.getByText('Areas')).toBeInTheDocument();
+      expect(screen.getByText('Quests')).toBeInTheDocument();
+    });
+
+    it('should display item counts in accordion headers', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Sessions has 1 item
+      const sessionsSection = screen.getByText('Sessions').closest('button');
+      expect(within(sessionsSection!).getByText('1')).toBeInTheDocument();
+
+      // Areas has 1 item
+      const areasSection = screen.getByText('Areas').closest('button');
+      expect(within(areasSection!).getByText('1')).toBeInTheDocument();
+
+      // Quests has 1 item
+      const questsSection = screen.getByText('Quests').closest('button');
+      expect(within(questsSection!).getByText('1')).toBeInTheDocument();
+
+      // People has 1 item (NPC)
+      const peopleSection = screen.getByText('People').closest('button');
+      expect(within(peopleSection!).getByText('1')).toBeInTheDocument();
+    });
+
+    it('should display search input', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      expect(screen.getByPlaceholderText('Search notes...')).toBeInTheDocument();
+    });
+
+    it('should filter notes when searching', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const searchInput = screen.getByPlaceholderText('Search notes...');
+      await user.type(searchInput, 'Tavern');
+
+      // After searching, only matching items should appear
+      // The "Areas" section should still show 1 (the Tavern)
+      // Other sections should show 0
+      await waitFor(() => {
+        const sessionsSection = screen.getByText('Sessions').closest('button');
+        expect(within(sessionsSection!).getByText('0')).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('Left Panel - Today Button', () => {
+    it('should display Today button with current date', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      expect(screen.getByRole('button', { name: new RegExp(`Today.*${todayStr}`) })).toBeInTheDocument();
+    });
+
+    it('should highlight Today button when in today mode (default)', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      const todayButton = screen.getByRole('button', { name: new RegExp(`Today.*${todayStr}`) });
+
+      // The button should have the secondary variant when active
+      expect(todayButton).toHaveClass('bg-primary/10');
+    });
+  });
+
+  describe('Left Panel - Note Items', () => {
+    it('should display session notes in Sessions accordion', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Sessions accordion is open by default
       expect(screen.getByText('2024-01-15 — The Beginning')).toBeInTheDocument();
+    });
+
+    it('should display area notes in Areas accordion when expanded', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Click to expand Areas accordion
+      await user.click(screen.getByText('Areas'));
+
       expect(screen.getByText('Tavern of the Rusty Blade')).toBeInTheDocument();
+    });
+
+    it('should display quest notes in Quests accordion when expanded', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Click to expand Quests accordion
+      await user.click(screen.getByText('Quests'));
+
       expect(screen.getByText('Find the Missing Artifact')).toBeInTheDocument();
     });
+  });
 
-    it('should display page title as "Sessions"', () => {
+  describe('Right Panel - Editor', () => {
+    it('should display "Today" header in default mode', () => {
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      expect(screen.getByRole('heading', { name: 'Sessions' })).toBeInTheDocument();
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      expect(screen.getByRole('heading', { name: new RegExp(`Today.*${todayStr}`) })).toBeInTheDocument();
     });
 
-    it('should show "New Session" button', () => {
+    it('should display content textarea for session notes', () => {
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      expect(screen.getByTestId('button-create-note')).toHaveTextContent('New Session');
+      expect(screen.getByLabelText('Session Notes')).toBeInTheDocument();
+    });
+
+    it('should display placeholder text in empty editor', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      expect(screen.getByPlaceholderText('Start typing your session notes...')).toBeInTheDocument();
     });
   });
 
-  describe('FR-3: Default Title to Current Date', () => {
-    it('should prefill title with current date when creating new session', async () => {
+  describe('Note Selection', () => {
+    it('should load selected note in editor when clicked', async () => {
       const user = userEvent.setup();
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      // Click create button
-      await user.click(screen.getByTestId('button-create-note'));
+      // Expand Areas accordion and click on the area note
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
 
-      // Check title is prefilled with today's date
-      const titleInput = screen.getByTestId('input-note-title');
-      const expectedDate = format(new Date(), 'yyyy-MM-dd');
-      expect(titleInput).toHaveValue(expectedDate);
+      // Editor should show the note's type badge and title
+      await waitFor(() => {
+        expect(screen.getByText('Area')).toBeInTheDocument();
+      });
+      expect(screen.getByRole('heading', { name: 'Tavern of the Rusty Blade' })).toBeInTheDocument();
     });
 
-    it('should allow editing the prefilled title', async () => {
+    it('should return to today mode when Today button is clicked', async () => {
       const user = userEvent.setup();
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      await user.click(screen.getByTestId('button-create-note'));
+      // Select a different note first
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
 
-      const titleInput = screen.getByTestId('input-note-title');
-      await user.clear(titleInput);
-      await user.type(titleInput, '2024-01-20 — The Heist');
+      // Click Today button to return
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      await user.click(screen.getByRole('button', { name: new RegExp(`Today.*${todayStr}`) }));
 
-      expect(titleInput).toHaveValue('2024-01-20 — The Heist');
+      // Should show Today header again
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: new RegExp(`Today.*${todayStr}`) })).toBeInTheDocument();
+      });
     });
   });
 
-  describe('FR-4: Editable Session Date Field', () => {
-    it('should display session date field in create dialog', async () => {
+  describe('Session Creation', () => {
+    it('should create session when typing content in today mode', async () => {
       const user = userEvent.setup();
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      await user.click(screen.getByTestId('button-create-note'));
-
-      const dateInput = screen.getByTestId('input-session-date');
-      expect(dateInput).toBeInTheDocument();
-      expect(dateInput).toHaveAttribute('type', 'date');
-    });
-
-    it('should prefill session date with current date', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      await user.click(screen.getByTestId('button-create-note'));
-
-      const dateInput = screen.getByTestId('input-session-date');
-      const expectedDate = format(new Date(), 'yyyy-MM-dd');
-      expect(dateInput).toHaveValue(expectedDate);
-    });
-
-    it('should allow changing session date independently of title', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      await user.click(screen.getByTestId('button-create-note'));
-
-      const dateInput = screen.getByTestId('input-session-date');
-      const titleInput = screen.getByTestId('input-note-title');
-
-      // Get initial values
-      const initialTitle = (titleInput as HTMLInputElement).value;
-
-      // Change the date
-      await user.clear(dateInput);
-      await user.type(dateInput, '2024-06-15');
-
-      // Title should remain unchanged
-      expect(titleInput).toHaveValue(initialTitle);
-      expect(dateInput).toHaveValue('2024-06-15');
-    });
-
-    it('should allow changing title independently of session date', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      await user.click(screen.getByTestId('button-create-note'));
-
-      const dateInput = screen.getByTestId('input-session-date');
-      const titleInput = screen.getByTestId('input-note-title');
-
-      // Get initial date
-      const initialDate = (dateInput as HTMLInputElement).value;
-
-      // Change the title
-      await user.clear(titleInput);
-      await user.type(titleInput, 'Custom Title');
-
-      // Date should remain unchanged
-      expect(dateInput).toHaveValue(initialDate);
-      expect(titleInput).toHaveValue('Custom Title');
-    });
-  });
-
-  describe('FR-5: Session List Display', () => {
-    it('should display session date on each note card', () => {
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      // Session log should show its session date (format may vary by locale)
-      const sessionCard = screen.getByTestId('note-card-note-1');
-      // Look for a date badge with calendar icon
-      const sessionDateBadge = within(sessionCard).getAllByRole('generic').find(
-        el => el.textContent?.includes('2024') || el.textContent?.includes('15')
-      );
-      expect(sessionDateBadge).toBeTruthy();
-
-      // Location note (no session date) should show created date
-      const locationCard = screen.getByTestId('note-card-note-2');
-      const locationDateBadge = within(locationCard).getAllByRole('generic').find(
-        el => el.textContent?.includes('2024') || el.textContent?.includes('10')
-      );
-      expect(locationDateBadge).toBeTruthy();
-    });
-
-    it('should display note type badge on each card', () => {
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      const sessionCard = screen.getByTestId('note-card-note-1');
-      expect(within(sessionCard).getByText('Session')).toBeInTheDocument();
-
-      const locationCard = screen.getByTestId('note-card-note-2');
-      expect(within(locationCard).getByText('Location')).toBeInTheDocument();
-    });
-
-    it('should sort notes by session date descending', () => {
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      const cards = screen.getAllByTestId(/^note-card-/);
-
-      // First card should be the most recent (session log from Jan 15)
-      expect(within(cards[0]).getByText('2024-01-15 — The Beginning')).toBeInTheDocument();
-    });
-  });
-
-  describe('FR-2: Unified Creation Flow', () => {
-    it('should default to session_log type when creating', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      await user.click(screen.getByTestId('button-create-note'));
-
-      // Type selector should show Session as default
-      const typeSelect = screen.getByTestId('select-note-type');
-      expect(within(typeSelect).getByText('Session')).toBeInTheDocument();
-    });
-
-    it('should have a note type selector available', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      await user.click(screen.getByTestId('button-create-note'));
-
-      // Type selector should be present and show current selection
-      const typeSelect = screen.getByTestId('select-note-type');
-      expect(typeSelect).toBeInTheDocument();
-      // Default should be Session
-      expect(within(typeSelect).getByText('Session')).toBeInTheDocument();
-    });
-
-    it('should submit session with correct data', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      await user.click(screen.getByTestId('button-create-note'));
-
-      // Fill in content
-      const contentInput = screen.getByTestId('textarea-note-content');
+      const contentInput = screen.getByLabelText('Session Notes');
       await user.type(contentInput, 'Test session content');
 
-      // Submit
-      await user.click(screen.getByTestId('button-save-note'));
-
-      // Verify API was called with session_log type and sessionDate
-      expect(mockApiRequest).toHaveBeenCalledWith(
-        'POST',
-        '/api/teams/team-1/notes',
-        expect.objectContaining({
-          noteType: 'session_log',
-          sessionDate: expect.any(String),
-        })
-      );
+      // Wait for autosave debounce (750ms)
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'POST',
+          '/api/teams/team-1/notes',
+          expect.objectContaining({
+            noteType: 'session_log',
+            content: expect.stringContaining('Test session content'),
+          })
+        );
+      }, { timeout: 2000 });
     });
   });
 
-  describe('Type Filtering', () => {
-    it('should show all type filters including Session', () => {
-      renderWithProviders(<NotesPage team={mockTeam} />);
-
-      expect(screen.getByTestId('filter-all')).toBeInTheDocument();
-      expect(screen.getByTestId('filter-session_log')).toBeInTheDocument();
-      expect(screen.getByTestId('filter-location')).toBeInTheDocument();
-      expect(screen.getByTestId('filter-quest')).toBeInTheDocument();
-    });
-
-    it('should filter by note type when filter is selected', async () => {
+  describe('Note Type Display', () => {
+    it('should use "Area" label instead of "Location"', async () => {
       const user = userEvent.setup();
       renderWithProviders(<NotesPage team={mockTeam} />);
 
-      // Click location filter
-      await user.click(screen.getByTestId('filter-location'));
+      // Select the area note
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
 
-      // Only location notes should be visible
-      expect(screen.queryByText('2024-01-15 — The Beginning')).not.toBeInTheDocument();
-      expect(screen.getByText('Tavern of the Rusty Blade')).toBeInTheDocument();
-      expect(screen.queryByText('Find the Missing Artifact')).not.toBeInTheDocument();
+      // Should display "Area" badge, not "Location"
+      await waitFor(() => {
+        expect(screen.getByText('Area')).toBeInTheDocument();
+      });
+      expect(screen.queryByText('Location')).not.toBeInTheDocument();
+    });
+
+    it('should display "Areas" category in left panel, not "Locations"', () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      expect(screen.getByText('Areas')).toBeInTheDocument();
+      expect(screen.queryByText('Locations')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Delete Functionality', () => {
+    it('should show delete button when note is selected', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Select a note
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
+
+      // Wait for the note to be loaded in editor
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'Tavern of the Rusty Blade' })).toBeInTheDocument();
+      });
+
+      // Delete button should be visible (trash icon)
+      const deleteButton = screen.getByRole('button', { name: '' }); // Icon button has no accessible name
+      expect(deleteButton).toBeInTheDocument();
     });
   });
 });

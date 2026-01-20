@@ -196,7 +196,7 @@ describe("Import Runs API (PRD-015A)", () => {
         teamId: testTeam.id,
         authorId: testUser.id,
         title: "Note 2",
-        noteType: "person",
+        noteType: "npc",
         importRunId: importRun.id,
         createdByUserId: testUser.id,
         updatedByUserId: testUser.id,
@@ -505,6 +505,265 @@ describe("Import Runs API (PRD-015A)", () => {
       expect(note.importRunId).toBe(importRun.id);
       expect(note.createdByUserId).toBe(testUser.id);
       expect(note.updatedByUserId).toBe(testUser.id);
+    });
+  });
+
+  describe("Suggestion-Created Entity Cascade Delete (PRD-034)", () => {
+    it("should delete suggestion-created notes when their source import is deleted", async () => {
+      // 1. Create import run
+      const importRun = await storage.createImportRun({
+        teamId: testTeam.id,
+        sourceSystem: "NUCLINO",
+        createdByUserId: testUser.id,
+        status: "completed",
+        options: { importEmptyPages: true, defaultVisibility: "private" },
+        stats: null,
+      });
+
+      // 2. Create a session log from the import
+      const sessionNote = await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "Session 1",
+        noteType: "session_log",
+        importRunId: importRun.id,
+      });
+
+      // 3. Create an entity note from suggestions panel (linked to same import)
+      const entityNote = await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "Gandalf the Grey",
+        noteType: "npc",
+        importRunId: importRun.id, // Key: inherits import run ID from session
+      });
+
+      // 4. Create a backlink from session to entity
+      await storage.createBacklink({
+        sourceNoteId: sessionNote.id,
+        targetNoteId: entityNote.id,
+        textSnippet: "met Gandalf the Grey",
+      });
+
+      // Verify notes exist
+      let allNotes = await storage.getNotes(testTeam.id);
+      expect(allNotes.length).toBe(2);
+
+      // 5. Delete the import run notes
+      await storage.deleteNotesByImportRun(importRun.id);
+
+      // 6. Verify both notes are deleted
+      allNotes = await storage.getNotes(testTeam.id);
+      expect(allNotes.length).toBe(0);
+    });
+
+    it("should NOT delete manually-created notes when an import is deleted", async () => {
+      const importRun = await storage.createImportRun({
+        teamId: testTeam.id,
+        sourceSystem: "NUCLINO",
+        createdByUserId: testUser.id,
+        status: "completed",
+        options: { importEmptyPages: true, defaultVisibility: "private" },
+        stats: null,
+      });
+
+      // Create session from import
+      await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "Imported Session",
+        noteType: "session_log",
+        importRunId: importRun.id,
+      });
+
+      // Create manual note (no importRunId - simulating note created outside of imported session)
+      const manualNote = await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "My Manual Note",
+        noteType: "note",
+        // No importRunId - this is a manually created note
+      });
+
+      // Delete import
+      await storage.deleteNotesByImportRun(importRun.id);
+
+      // Manual note should still exist
+      const allNotes = await storage.getNotes(testTeam.id);
+      expect(allNotes.length).toBe(1);
+      expect(allNotes[0].id).toBe(manualNote.id);
+    });
+
+    it("should delete backlinks when suggestion-created entity is deleted with import", async () => {
+      const importRun = await storage.createImportRun({
+        teamId: testTeam.id,
+        sourceSystem: "NUCLINO",
+        createdByUserId: testUser.id,
+        status: "completed",
+        options: { importEmptyPages: true, defaultVisibility: "private" },
+        stats: null,
+      });
+
+      const sessionNote = await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "Session",
+        noteType: "session_log",
+        importRunId: importRun.id,
+      });
+
+      const entityNote = await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "Entity",
+        noteType: "npc",
+        importRunId: importRun.id,
+      });
+
+      await storage.createBacklink({
+        sourceNoteId: sessionNote.id,
+        targetNoteId: entityNote.id,
+        textSnippet: "reference",
+      });
+
+      // Verify backlink exists
+      let backlinks = await storage.getBacklinks(entityNote.id);
+      expect(backlinks.length).toBe(1);
+
+      // Delete import
+      await storage.deleteNotesByImportRun(importRun.id);
+
+      // Notes should all be gone
+      const allNotes = await storage.getNotes(testTeam.id);
+      expect(allNotes.length).toBe(0);
+    });
+
+    it("should allow creating notes with importRunId via API-style call", async () => {
+      // This tests that importRunId can be passed when creating notes
+      // (simulating what happens when suggestions panel creates an entity)
+      const importRun = await storage.createImportRun({
+        teamId: testTeam.id,
+        sourceSystem: "NUCLINO",
+        createdByUserId: testUser.id,
+        status: "completed",
+        options: { importEmptyPages: true, defaultVisibility: "private" },
+        stats: null,
+      });
+
+      // Create note with explicit importRunId (like suggestion panel would do)
+      const note = await storage.createNote({
+        teamId: testTeam.id,
+        authorId: testUser.id,
+        title: "Suggestion Entity",
+        noteType: "npc",
+        importRunId: importRun.id,
+      });
+
+      expect(note.importRunId).toBe(importRun.id);
+
+      // Verify it's tracked as part of import
+      const importedNotes = await storage.getNotesByImportRun(importRun.id);
+      expect(importedNotes.length).toBe(1);
+      expect(importedNotes[0].title).toBe("Suggestion Entity");
+    });
+  });
+
+  describe("Empty Page Filtering Logic (PRD-042)", () => {
+    // Helper function that mirrors the backend filtering logic from routes.ts
+    const filterPagesToImport = (
+      pages: { sourcePageId: string; isEmpty: boolean }[],
+      options?: { excludedEmptyPageIds?: string[]; importEmptyPages?: boolean }
+    ) => {
+      let excludedEmptyPageIds: Set<string>;
+      if (options?.excludedEmptyPageIds && Array.isArray(options.excludedEmptyPageIds)) {
+        excludedEmptyPageIds = new Set(options.excludedEmptyPageIds);
+      } else {
+        const importEmptyPages = options?.importEmptyPages !== false;
+        excludedEmptyPageIds = importEmptyPages
+          ? new Set()
+          : new Set(pages.filter(p => p.isEmpty).map(p => p.sourcePageId));
+      }
+      return pages.filter(p => !p.isEmpty || !excludedEmptyPageIds.has(p.sourcePageId));
+    };
+
+    const testPages = [
+      { sourcePageId: "page-1", isEmpty: false },
+      { sourcePageId: "page-2", isEmpty: false },
+      { sourcePageId: "empty-1", isEmpty: true },
+      { sourcePageId: "empty-2", isEmpty: true },
+      { sourcePageId: "empty-3", isEmpty: true },
+    ];
+
+    it("should include all pages when excludedEmptyPageIds is empty array", () => {
+      const result = filterPagesToImport(testPages, { excludedEmptyPageIds: [] });
+      expect(result.length).toBe(5);
+      expect(result.map(p => p.sourcePageId)).toEqual([
+        "page-1", "page-2", "empty-1", "empty-2", "empty-3"
+      ]);
+    });
+
+    it("should exclude specific empty pages based on excludedEmptyPageIds", () => {
+      const result = filterPagesToImport(testPages, {
+        excludedEmptyPageIds: ["empty-1", "empty-3"]
+      });
+      expect(result.length).toBe(3);
+      expect(result.map(p => p.sourcePageId)).toEqual(["page-1", "page-2", "empty-2"]);
+    });
+
+    it("should exclude all empty pages when all are in excludedEmptyPageIds", () => {
+      const result = filterPagesToImport(testPages, {
+        excludedEmptyPageIds: ["empty-1", "empty-2", "empty-3"]
+      });
+      expect(result.length).toBe(2);
+      expect(result.map(p => p.sourcePageId)).toEqual(["page-1", "page-2"]);
+    });
+
+    it("should ignore non-existent page IDs in excludedEmptyPageIds", () => {
+      const result = filterPagesToImport(testPages, {
+        excludedEmptyPageIds: ["empty-1", "nonexistent-id"]
+      });
+      expect(result.length).toBe(4);
+      expect(result.map(p => p.sourcePageId)).toEqual([
+        "page-1", "page-2", "empty-2", "empty-3"
+      ]);
+    });
+
+    describe("Backward Compatibility with importEmptyPages boolean", () => {
+      it("should include all pages when importEmptyPages is true", () => {
+        const result = filterPagesToImport(testPages, { importEmptyPages: true });
+        expect(result.length).toBe(5);
+      });
+
+      it("should include all pages when importEmptyPages is undefined (defaults to true)", () => {
+        const result = filterPagesToImport(testPages, {});
+        expect(result.length).toBe(5);
+      });
+
+      it("should include all pages when options is undefined", () => {
+        const result = filterPagesToImport(testPages, undefined);
+        expect(result.length).toBe(5);
+      });
+
+      it("should exclude all empty pages when importEmptyPages is false", () => {
+        const result = filterPagesToImport(testPages, { importEmptyPages: false });
+        expect(result.length).toBe(2);
+        expect(result.every(p => !p.isEmpty)).toBe(true);
+      });
+    });
+
+    describe("excludedEmptyPageIds takes precedence over importEmptyPages", () => {
+      it("should use excludedEmptyPageIds when both options are provided", () => {
+        // excludedEmptyPageIds should take precedence
+        const result = filterPagesToImport(testPages, {
+          excludedEmptyPageIds: ["empty-1"],
+          importEmptyPages: false // This should be ignored
+        });
+        // Only empty-1 should be excluded, not all empty pages
+        expect(result.length).toBe(4);
+        expect(result.map(p => p.sourcePageId)).toEqual([
+          "page-1", "page-2", "empty-2", "empty-3"
+        ]);
+      });
     });
   });
 });

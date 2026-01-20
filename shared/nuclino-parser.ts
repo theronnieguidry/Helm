@@ -40,9 +40,9 @@ export interface PageClassification {
 export interface ImportSummary {
   totalPages: number;
   emptyPages: number;
-  collections: number;
-  people: number;
-  places: number;
+  characters: number;
+  npcs: number;
+  pois: number;
   questsOpen: number;
   questsDone: number;
   notes: number;
@@ -206,6 +206,28 @@ export function extractNuclinoLinks(content: string): NuclinoLink[] {
 }
 
 /**
+ * PRD-040: Strip directory/tree structure patterns from content.
+ * Nuclino exports sometimes contain directory tree visualizations that cause noise.
+ *
+ * @example
+ * stripDirectoryStructure("├── folder/\n│   └── file.md")
+ * // => ""
+ */
+export function stripDirectoryStructure(content: string): string {
+  // Remove lines that look like directory trees:
+  // ├── folder/
+  // └── file.md
+  // │   └── subfolder/
+  // ─── item
+  // Only match lines that START with tree box-drawing characters
+  const treeLinePattern = /^[ \t]*[│├└─┬┴┼┤]+[─ ]*[^\n]*$/gm;
+  return content
+    .replace(treeLinePattern, '') // Lines starting with tree characters
+    .replace(/\n{3,}/g, '\n\n') // Collapse multiple newlines
+    .trim();
+}
+
+/**
  * Parse Nuclino markdown content.
  *
  * @returns The cleaned content and extracted links
@@ -213,9 +235,11 @@ export function extractNuclinoLinks(content: string): NuclinoLink[] {
 export function parseNuclinoContent(markdown: string): { content: string; links: NuclinoLink[] } {
   const decoded = decodeHtmlEntities(markdown);
   const links = extractNuclinoLinks(decoded);
+  // PRD-040: Strip directory structure noise
+  const cleaned = stripDirectoryStructure(decoded);
 
   return {
-    content: decoded.trim(), // Trim leading/trailing whitespace from HTML entities
+    content: cleaned.trim(), // Trim leading/trailing whitespace
     links,
   };
 }
@@ -318,26 +342,33 @@ export function buildCollectionMembership(
 
 /**
  * Classify a page based on its collection membership.
+ * @param partyMemberNames - Optional set of party member names (lowercase) for PC detection
  */
 export function classifyNuclinoPage(
   page: NuclinoPage,
   membership: Map<string, CollectionInfo["collectionType"][]>,
-  collections: Map<string, CollectionInfo>
+  collections: Map<string, CollectionInfo>,
+  partyMemberNames?: Set<string>
 ): PageClassification {
-  // Check if this is a collection page itself
+  // Check if this is a collection page itself - now maps to "note"
   if (collections.has(page.sourcePageId)) {
-    return { noteType: "collection" };
+    return { noteType: "note" };
   }
 
   const memberOf = membership.get(page.sourcePageId) || [];
 
-  // Priority: Person > Place > Quest (Done > Open) > Note
+  // Priority: NPC/Character > POI > Quest (Done > Open) > Note
   if (memberOf.includes("notable_people")) {
-    return { noteType: "person" };
+    // Check if this is a PC (party member) by name matching
+    const normalizedTitle = page.title.toLowerCase().trim();
+    if (partyMemberNames && partyMemberNames.has(normalizedTitle)) {
+      return { noteType: "character" };
+    }
+    return { noteType: "npc" };
   }
 
   if (memberOf.includes("places")) {
-    return { noteType: "place" };
+    return { noteType: "poi" };
   }
 
   if (memberOf.includes("done")) {
@@ -430,9 +461,9 @@ export function generateImportSummary(
   const summary: ImportSummary = {
     totalPages: pages.length,
     emptyPages: 0,
-    collections: 0,
-    people: 0,
-    places: 0,
+    characters: 0,
+    npcs: 0,
+    pois: 0,
     questsOpen: 0,
     questsDone: 0,
     notes: 0,
@@ -447,14 +478,14 @@ export function generateImportSummary(
     if (!classification) continue;
 
     switch (classification.noteType) {
-      case "collection":
-        summary.collections++;
+      case "character":
+        summary.characters++;
         break;
-      case "person":
-        summary.people++;
+      case "npc":
+        summary.npcs++;
         break;
-      case "place":
-        summary.places++;
+      case "poi":
+        summary.pois++;
         break;
       case "quest":
         if (classification.questStatus === "done") {
@@ -473,9 +504,11 @@ export function generateImportSummary(
 
 /**
  * Main entry point: Parse and classify all pages from a Nuclino export.
+ * @param partyMemberNames - Optional set of party member names (lowercase) for PC detection
  */
 export function processNuclinoExport(
-  entries: Array<{ filename: string; content: string; lastModified?: Date }>
+  entries: Array<{ filename: string; content: string; lastModified?: Date }>,
+  partyMemberNames?: Set<string>
 ): {
   pages: NuclinoPage[];
   collections: Map<string, CollectionInfo>;
@@ -496,7 +529,7 @@ export function processNuclinoExport(
   for (const page of pages) {
     classifications.set(
       page.sourcePageId,
-      classifyNuclinoPage(page, membership, collections)
+      classifyNuclinoPage(page, membership, collections, partyMemberNames)
     );
   }
 

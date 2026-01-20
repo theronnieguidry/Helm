@@ -59,20 +59,20 @@ interface SessionReviewPageProps {
 }
 
 const ENTITY_TYPE_ICONS: Record<EntityType, typeof User> = {
-  person: User,
+  npc: User,
   place: MapPin,
   quest: ScrollText,
 };
 
 const ENTITY_TYPE_COLORS: Record<EntityType, string> = {
-  person: "bg-green-500/10 text-green-500 border-green-500/20",
+  npc: "bg-green-500/10 text-green-500 border-green-500/20",
   place: "bg-blue-500/10 text-blue-500 border-blue-500/20",
   quest: "bg-red-500/10 text-red-500 border-red-500/20",
 };
 
 const ENTITY_TYPE_NOTE_TYPE: Record<EntityType, NoteType> = {
-  person: "npc",
-  place: "location",
+  npc: "npc",
+  place: "poi",
   quest: "quest",
 };
 

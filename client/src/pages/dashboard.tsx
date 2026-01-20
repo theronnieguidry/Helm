@@ -17,7 +17,6 @@ import {
   ScrollText,
   Copy,
   Check,
-  FolderOpen,
   FileText
 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
@@ -31,30 +30,22 @@ interface DashboardContentProps {
 }
 
 const NOTE_TYPE_ICONS: Record<NoteType, typeof MapPin> = {
-  location: MapPin,
+  area: MapPin,
   character: User,
   npc: Users,
   poi: MapPin,
   quest: ScrollText,
   session_log: BookOpen,
-  // PRD-015: Import types
-  person: User,
-  place: MapPin,
-  collection: FolderOpen,
   note: FileText,
 };
 
 const NOTE_TYPE_COLORS: Record<NoteType, string> = {
-  location: "bg-blue-500/10 text-blue-500",
+  area: "bg-blue-500/10 text-blue-500",
   character: "bg-green-500/10 text-green-500",
   npc: "bg-orange-500/10 text-orange-500",
   poi: "bg-purple-500/10 text-purple-500",
   quest: "bg-red-500/10 text-red-500",
   session_log: "bg-amber-500/10 text-amber-500",
-  // PRD-015: Import types
-  person: "bg-cyan-500/10 text-cyan-500",
-  place: "bg-teal-500/10 text-teal-500",
-  collection: "bg-indigo-500/10 text-indigo-500",
   note: "bg-gray-500/10 text-gray-500",
 };
 

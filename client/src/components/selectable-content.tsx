@@ -21,7 +21,7 @@ interface SelectionPosition {
 }
 
 const ENTITY_TYPES: { type: EntityType; label: string; icon: typeof User }[] = [
-  { type: "person", label: "Person", icon: User },
+  { type: "npc", label: "NPC", icon: User },
   { type: "place", label: "Place", icon: MapPin },
   { type: "quest", label: "Quest", icon: ScrollText },
 ];

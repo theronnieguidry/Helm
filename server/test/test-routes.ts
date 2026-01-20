@@ -250,6 +250,42 @@ export async function registerTestRoutes(
     }
   });
 
+  // PRD-019: Get today's session note
+  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const todaySession = await storage.findSessionByDate(teamId, new Date());
+      res.json(todaySession ?? null);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch today's session" });
+    }
+  });
+
+  // PRD-037: Get notes needing review (low-confidence AI classifications)
+  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const items = await storage.getPendingLowConfidenceClassifications(teamId);
+      res.json({ items, count: items.length });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch needs-review items" });
+    }
+  });
+
   app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
@@ -259,6 +295,15 @@ export async function registerTestRoutes(
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // PRD-023: For session_log type, check if one already exists for the given date (idempotency)
+      if (noteType === "session_log" && sessionDate) {
+        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
+        if (existing) {
+          // Return existing session instead of creating duplicate
+          return res.status(200).json(existing);
+        }
       }
 
       const note = await storage.createNote({

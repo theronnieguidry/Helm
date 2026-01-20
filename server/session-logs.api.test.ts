@@ -84,6 +84,156 @@ describe("Session Logs API (PRD-001)", () => {
       // Note: default isPrivate is false in schema, but we're testing it can be set
       expect(res.body.noteType).toBe("session_log");
     });
+
+    // PRD-021: Verify sessionDate is properly converted from ISO string to Date
+    it("should correctly persist and return sessionDate", async () => {
+      const today = new Date();
+      const res = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Test Session",
+          noteType: "session_log",
+          sessionDate: today.toISOString(),
+          content: "Test content",
+        })
+        .expect(200);
+
+      expect(res.body.sessionDate).toBeDefined();
+      const returnedDate = new Date(res.body.sessionDate);
+      expect(returnedDate.toDateString()).toBe(today.toDateString());
+    });
+
+    // PRD-023: Idempotent session creation to prevent duplicates
+    it("should return existing session instead of creating duplicate for same date", async () => {
+      const sessionDate = new Date("2024-03-15T19:00:00Z");
+
+      // Create first session
+      const firstRes = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "First Session",
+          noteType: "session_log",
+          sessionDate: sessionDate.toISOString(),
+          content: "First content",
+        })
+        .expect(200);
+
+      const firstId = firstRes.body.id;
+
+      // Attempt to create second session for same date
+      const secondRes = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Second Session",
+          noteType: "session_log",
+          sessionDate: sessionDate.toISOString(),
+          content: "Second content",
+        })
+        .expect(200);
+
+      // Should return the existing session, not create a new one
+      expect(secondRes.body.id).toBe(firstId);
+      expect(secondRes.body.title).toBe("First Session");
+      expect(secondRes.body.content).toBe("First content");
+
+      // Verify only one session exists
+      const allNotes = await storage.getSessionLogs(teamId);
+      expect(allNotes).toHaveLength(1);
+    });
+
+    // PRD-023: Rapid creation attempts should not create duplicates
+    it("should handle rapid concurrent creation attempts without duplicates", async () => {
+      const sessionDate = new Date("2024-03-16T19:00:00Z");
+
+      // Simulate rapid concurrent requests (like autosave race condition)
+      const requests = [
+        request(app)
+          .post(`/api/teams/${teamId}/notes`)
+          .send({
+            title: "Rapid 1",
+            noteType: "session_log",
+            sessionDate: sessionDate.toISOString(),
+            content: "M",
+          }),
+        request(app)
+          .post(`/api/teams/${teamId}/notes`)
+          .send({
+            title: "Rapid 2",
+            noteType: "session_log",
+            sessionDate: sessionDate.toISOString(),
+            content: "Misty Vale",
+          }),
+      ];
+
+      const results = await Promise.all(requests);
+
+      // Both should succeed (200)
+      expect(results[0].status).toBe(200);
+      expect(results[1].status).toBe(200);
+
+      // Both should return the same session ID (one was created, one returned existing)
+      expect(results[0].body.id).toBe(results[1].body.id);
+
+      // Only one session should exist
+      const allNotes = await storage.getSessionLogs(teamId);
+      expect(allNotes).toHaveLength(1);
+    });
+
+    // PRD-023: Different dates should still create separate sessions
+    it("should create separate sessions for different dates", async () => {
+      const date1 = new Date("2024-03-17T19:00:00Z");
+      const date2 = new Date("2024-03-18T19:00:00Z");
+
+      const res1 = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Session Day 1",
+          noteType: "session_log",
+          sessionDate: date1.toISOString(),
+        })
+        .expect(200);
+
+      const res2 = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Session Day 2",
+          noteType: "session_log",
+          sessionDate: date2.toISOString(),
+        })
+        .expect(200);
+
+      // Should be different sessions
+      expect(res1.body.id).not.toBe(res2.body.id);
+
+      const allNotes = await storage.getSessionLogs(teamId);
+      expect(allNotes).toHaveLength(2);
+    });
+
+    // PRD-023: Non-session notes should not be affected by idempotency
+    it("should allow creating multiple notes of other types on same date", async () => {
+      const date = new Date("2024-03-19T19:00:00Z");
+
+      const res1 = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Location 1",
+          noteType: "area",
+          sessionDate: date.toISOString(),
+        })
+        .expect(200);
+
+      const res2 = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Location 2",
+          noteType: "area",
+          sessionDate: date.toISOString(),
+        })
+        .expect(200);
+
+      // Should create separate notes
+      expect(res1.body.id).not.toBe(res2.body.id);
+    });
   });
 
   describe("Retrieving session logs", () => {
@@ -91,7 +241,7 @@ describe("Session Logs API (PRD-001)", () => {
       // Create a regular note
       await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location Note", noteType: "location" });
+        .send({ title: "Location Note", noteType: "area" });
 
       // Create a session log
       await request(app)
@@ -104,7 +254,7 @@ describe("Session Logs API (PRD-001)", () => {
 
       expect(res.body).toHaveLength(2);
       const types = res.body.map((n: { noteType: string }) => n.noteType);
-      expect(types).toContain("location");
+      expect(types).toContain("area");
       expect(types).toContain("session_log");
     });
 
@@ -129,7 +279,7 @@ describe("Session Logs API (PRD-001)", () => {
       // Create a regular note (should not appear in session logs)
       await request(app)
         .post(`/api/teams/${teamId}/notes`)
-        .send({ title: "Location", noteType: "location" });
+        .send({ title: "Location", noteType: "area" });
 
       const sessionLogs = await storage.getSessionLogs(teamId);
       expect(sessionLogs).toHaveLength(2);
@@ -221,6 +371,56 @@ describe("Session Logs API (PRD-001)", () => {
         .expect(403);
 
       otherResult.server.close();
+    });
+  });
+
+  // PRD-019: Today's session endpoint tests
+  describe("Today's session endpoint", () => {
+    it("should return null when no session exists for today", async () => {
+      const res = await request(app)
+        .get(`/api/teams/${teamId}/notes/today-session`)
+        .expect(200);
+
+      expect(res.body).toBeNull();
+    });
+
+    it("should return today's session when it exists", async () => {
+      const today = new Date();
+      await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Today's Session",
+          noteType: "session_log",
+          sessionDate: today.toISOString(),
+          content: "Today's notes",
+        });
+
+      const res = await request(app)
+        .get(`/api/teams/${teamId}/notes/today-session`)
+        .expect(200);
+
+      expect(res.body).not.toBeNull();
+      expect(res.body.title).toBe("Today's Session");
+      expect(res.body.content).toBe("Today's notes");
+    });
+
+    it("should not return sessions from other dates", async () => {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Yesterday's Session",
+          noteType: "session_log",
+          sessionDate: yesterday.toISOString(),
+        });
+
+      const res = await request(app)
+        .get(`/api/teams/${teamId}/notes/today-session`)
+        .expect(200);
+
+      expect(res.body).toBeNull();
     });
   });
 });

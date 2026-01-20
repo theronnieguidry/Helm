@@ -1,12 +1,15 @@
 /**
  * PRD-016: Enrichment Worker
+ * PRD-043: AI Cache Integration
  *
  * Background job processor for AI enrichment of imported notes.
  * Processes enrichment runs asynchronously to keep imports fast.
+ * Uses caching to avoid redundant API calls for unchanged content.
  */
 
 import { storage } from "../storage";
-import { createAIProvider, type AIProvider, type NoteForClassification, type NoteWithClassification, CONFIDENCE_THRESHOLDS } from "../ai";
+import { createAIProvider, type AIProvider, type NoteForClassification, type NoteWithClassification, type ClassificationResult, CONFIDENCE_THRESHOLDS } from "../ai";
+import { createAICache, type AICache } from "../ai/ai-cache";
 import type { Note, EnrichmentRunTotals } from "@shared/schema";
 
 interface EnrichmentJob {
@@ -20,6 +23,7 @@ interface EnrichmentJob {
 const jobQueue: EnrichmentJob[] = [];
 let isProcessing = false;
 let aiProvider: AIProvider | null = null;
+let aiCache: AICache | null = null;
 
 /**
  * Get or create the AI provider instance
@@ -29,6 +33,16 @@ function getAIProvider(): AIProvider {
     aiProvider = createAIProvider();
   }
   return aiProvider;
+}
+
+/**
+ * PRD-043: Get or create the AI cache instance
+ */
+function getAICache(): AICache {
+  if (!aiCache) {
+    aiCache = createAICache(storage);
+  }
+  return aiCache;
 }
 
 /**
@@ -109,10 +123,17 @@ async function processEnrichment(job: EnrichmentJob): Promise<void> {
   }
 
   const provider = getAIProvider();
+  const cache = getAICache();
 
-  // Phase 1: Classify notes
+  // Phase 1: Classify notes (with caching)
   const notesForClassification = prepareNotesForClassification(notes, overrideExisting);
-  const classificationResults = await provider.classifyNotes(notesForClassification);
+  const classificationResults = await classifyNotesWithCache(
+    notesForClassification,
+    provider,
+    cache,
+    job.teamId,
+    [] // PC names - could be enhanced to pass from team settings
+  );
 
   // Store classification results
   let classificationsCreated = 0;
@@ -196,6 +217,68 @@ async function processEnrichment(job: EnrichmentJob): Promise<void> {
 }
 
 /**
+ * PRD-043: Classify notes with caching
+ *
+ * Checks cache first, only sends uncached notes to AI provider,
+ * then stores fresh results in cache.
+ */
+async function classifyNotesWithCache(
+  notes: NoteForClassification[],
+  provider: AIProvider,
+  cache: AICache,
+  teamId: string,
+  pcNames: string[]
+): Promise<ClassificationResult[]> {
+  if (notes.length === 0) {
+    return [];
+  }
+
+  // Phase 1: Check cache for all notes
+  const cachedResults = await cache.getClassificationsBatch(notes, pcNames, teamId);
+  const uncachedNotes = notes.filter((n) => !cachedResults.has(n.id));
+
+  // Log cache statistics
+  const cacheHits = notes.length - uncachedNotes.length;
+  if (cacheHits > 0) {
+    console.log(`AI Cache: ${cacheHits}/${notes.length} classification cache hits for team ${teamId}`);
+  }
+
+  // Phase 2: Classify uncached notes
+  let freshResults: ClassificationResult[] = [];
+  if (uncachedNotes.length > 0) {
+    freshResults = await provider.classifyNotes(uncachedNotes, undefined, {
+      playerCharacterNames: pcNames,
+    });
+
+    // Phase 3: Store fresh results in cache (fire and forget)
+    for (const result of freshResults) {
+      const note = uncachedNotes.find((n) => n.id === result.noteId);
+      if (note) {
+        cache.setClassification(note, pcNames, result, teamId).catch((err) => {
+          console.error("Failed to cache classification:", err);
+        });
+      }
+    }
+  }
+
+  // Merge cached and fresh results, maintaining original order
+  return notes.map((n) => {
+    const cached = cachedResults.get(n.id);
+    if (cached) return cached;
+    const fresh = freshResults.find((r) => r.noteId === n.id);
+    if (fresh) return fresh;
+    // Should not happen, but fallback
+    return {
+      noteId: n.id,
+      inferredType: "Note" as const,
+      confidence: 0,
+      explanation: "Classification failed",
+      extractedEntities: [],
+    };
+  });
+}
+
+/**
  * Prepare notes for classification
  */
 function prepareNotesForClassification(
@@ -206,7 +289,7 @@ function prepareNotesForClassification(
     .filter((note) => {
       // Skip already-classified notes unless override is enabled
       if (!overrideExisting) {
-        const isAlreadyTyped = ["person", "place", "quest"].includes(note.noteType);
+        const isAlreadyTyped = ["character", "npc", "poi", "quest"].includes(note.noteType);
         if (isAlreadyTyped) {
           return false;
         }
@@ -255,15 +338,12 @@ function prepareNotesForRelationships(
  */
 function mapNoteTypeToInferred(noteType: string): string {
   const mapping: Record<string, string> = {
-    person: "Person",
-    character: "Person",
-    npc: "Person",
-    place: "Place",
-    location: "Place",
-    poi: "Place",
+    character: "Character",
+    npc: "NPC",
+    area: "Area",
+    poi: "Area", // POIs are a subtype of Areas
     quest: "Quest",
     session_log: "SessionLog",
-    collection: "Note",
     note: "Note",
   };
   return mapping[noteType] || "Note";
