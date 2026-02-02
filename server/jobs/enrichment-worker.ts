@@ -159,9 +159,14 @@ async function processEnrichment(job: EnrichmentJob): Promise<void> {
     }
   }
 
-  // Phase 2: Extract relationships
+  // Phase 2: Extract relationships (with caching)
   const notesWithClassifications = prepareNotesForRelationships(notes, classificationResults);
-  const relationshipResults = await provider.extractRelationships(notesWithClassifications);
+  const relationshipResults = await extractRelationshipsWithCache(
+    notesWithClassifications,
+    provider,
+    cache,
+    job.teamId
+  );
 
   // Store relationship results
   let relationshipsFound = 0;
@@ -237,10 +242,11 @@ async function classifyNotesWithCache(
   const cachedResults = await cache.getClassificationsBatch(notes, pcNames, teamId);
   const uncachedNotes = notes.filter((n) => !cachedResults.has(n.id));
 
-  // Log cache statistics
+  // Log cache statistics (always log to help debug cache issues)
   const cacheHits = notes.length - uncachedNotes.length;
-  if (cacheHits > 0) {
-    console.log(`AI Cache: ${cacheHits}/${notes.length} classification cache hits for team ${teamId}`);
+  console.log(`AI Cache: ${cacheHits}/${notes.length} classification cache hits for team ${teamId}`);
+  if (cacheHits === 0 && notes.length > 0) {
+    console.log(`AI Cache DEBUG: No classification cache hits for ${notes.length} notes.`);
   }
 
   // Phase 2: Classify uncached notes
@@ -250,15 +256,20 @@ async function classifyNotesWithCache(
       playerCharacterNames: pcNames,
     });
 
-    // Phase 3: Store fresh results in cache (fire and forget)
+    // Phase 3: Store fresh results in cache (AWAITED to ensure persistence)
+    const cacheWrites: Promise<void>[] = [];
     for (const result of freshResults) {
       const note = uncachedNotes.find((n) => n.id === result.noteId);
       if (note) {
-        cache.setClassification(note, pcNames, result, teamId).catch((err) => {
-          console.error("Failed to cache classification:", err);
-        });
+        cacheWrites.push(
+          cache.setClassification(note, pcNames, result, teamId).catch((err) => {
+            console.error("Failed to cache classification:", err);
+          })
+        );
       }
     }
+    await Promise.all(cacheWrites);
+    console.log(`AI Cache: Wrote ${freshResults.length} classification entries to cache for team ${teamId}`);
   }
 
   // Merge cached and fresh results, maintaining original order
@@ -276,6 +287,140 @@ async function classifyNotesWithCache(
       extractedEntities: [],
     };
   });
+}
+
+/**
+ * PRD-043: Extract relationships with caching
+ *
+ * Checks cache for previously analyzed note pairs, only sends uncached pairs to AI provider,
+ * then stores fresh results in cache.
+ */
+async function extractRelationshipsWithCache(
+  notes: NoteWithClassification[],
+  provider: AIProvider,
+  cache: AICache,
+  teamId: string
+): Promise<import("./ai").RelationshipResult[]> {
+  if (notes.length < 2) {
+    return [];
+  }
+
+  // Phase 1: Check cache for all note pairs
+  const cachedRelationships: import("./ai").RelationshipResult[] = [];
+  const checkedPairs = new Set<string>();
+  const uncachedPairs: Array<{ noteA: typeof notes[0]; noteB: typeof notes[0]; pairKey: string }> = [];
+  let cacheHitCount = 0;
+
+  // Create a map for quick note lookup
+  const noteMap = new Map(notes.map(n => [n.id, n]));
+
+  // Check each pair in the cache
+  for (let i = 0; i < notes.length; i++) {
+    for (let j = i + 1; j < notes.length; j++) {
+      const noteA = notes[i];
+      const noteB = notes[j];
+      const pairKey = [noteA.id, noteB.id].sort().join('::');
+
+      if (checkedPairs.has(pairKey)) continue;
+      checkedPairs.add(pairKey);
+
+      // Check cache for this pair
+      const cached = await cache.getRelationship(noteA, noteB, teamId);
+      if (cached) {
+        cacheHitCount++;
+        // Only add to results if it's a real relationship (not "None")
+        if (cached.relationshipType !== "None") {
+          cachedRelationships.push(cached);
+        }
+        // Either way, it's a cache hit - don't re-analyze
+      } else {
+        // This pair needs analysis
+        uncachedPairs.push({ noteA, noteB, pairKey });
+      }
+    }
+  }
+
+  // Log cache statistics (always log to help debug cache issues)
+  const totalPairs = checkedPairs.size;
+  console.log(`AI Cache: ${cacheHitCount}/${totalPairs} relationship cache hits for team ${teamId} (${uncachedPairs.length} pairs need analysis)`);
+  if (cacheHitCount === 0 && totalPairs > 0) {
+    console.log(`AI Cache DEBUG: No relationship cache hits. Checked ${totalPairs} pairs.`);
+  }
+
+  // Phase 2: Extract relationships for uncached pairs
+  let freshResults: import("./ai").RelationshipResult[] = [];
+
+  if (uncachedPairs.length > 0) {
+    // Get unique notes that need relationship analysis
+    const uncachedNoteIds = new Set<string>();
+    for (const { noteA, noteB } of uncachedPairs) {
+      uncachedNoteIds.add(noteA.id);
+      uncachedNoteIds.add(noteB.id);
+    }
+    const uncachedNotes = notes.filter(n => uncachedNoteIds.has(n.id));
+    freshResults = await provider.extractRelationships(uncachedNotes);
+
+    // Phase 3: Store fresh results in cache AND cache "no relationship" for pairs without results
+    const cacheWrites: Promise<void>[] = [];
+
+    // Create a set of pairs that have relationships
+    const pairsWithRelationships = new Set<string>();
+    for (const result of freshResults) {
+      const pairKey = [result.fromNoteId, result.toNoteId].sort().join('::');
+      pairsWithRelationships.add(pairKey);
+
+      const fromNote = noteMap.get(result.fromNoteId);
+      const toNote = noteMap.get(result.toNoteId);
+      if (fromNote && toNote) {
+        cacheWrites.push(
+          cache.setRelationship(fromNote, toNote, result, teamId).catch((err) => {
+            console.error("Failed to cache relationship:", err);
+          })
+        );
+      }
+    }
+
+    // Cache "no relationship" for pairs that were analyzed but had no relationship
+    let noRelationshipCount = 0;
+    for (const { noteA, noteB, pairKey } of uncachedPairs) {
+      if (!pairsWithRelationships.has(pairKey)) {
+        // This pair was analyzed but no relationship was found - cache that fact
+        const noRelationshipResult: import("./ai").RelationshipResult = {
+          fromNoteId: noteA.id,
+          toNoteId: noteB.id,
+          relationshipType: "None",
+          confidence: 1.0,
+          evidenceSnippet: "",
+          evidenceType: "Analyzed",
+        };
+        cacheWrites.push(
+          cache.setRelationship(noteA, noteB, noRelationshipResult, teamId).catch((err) => {
+            console.error("Failed to cache no-relationship:", err);
+          })
+        );
+        noRelationshipCount++;
+      }
+    }
+
+    await Promise.all(cacheWrites);
+    console.log(`AI Cache: Wrote ${freshResults.length} relationships + ${noRelationshipCount} no-relationship markers to cache for team ${teamId}`);
+  }
+
+  // Merge cached and fresh results, deduplicating by pair (exclude "None" relationships)
+  const allResults = [...cachedRelationships, ...freshResults];
+  const seenPairs = new Set<string>();
+  const deduplicatedResults: import("./ai").RelationshipResult[] = [];
+
+  for (const result of allResults) {
+    if (result.relationshipType === "None") continue; // Don't include "no relationship" in results
+    const pairKey = [result.fromNoteId, result.toNoteId].sort().join('::');
+    if (!seenPairs.has(pairKey)) {
+      seenPairs.add(pairKey);
+      deduplicatedResults.push(result);
+    }
+  }
+
+  return deduplicatedResults;
 }
 
 /**

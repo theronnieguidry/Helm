@@ -1,5 +1,5 @@
 import { sql, relations } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, json, real } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, json, real, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -335,10 +335,10 @@ export type InferredEntityType = typeof INFERRED_ENTITY_TYPES[number];
 export const CLASSIFICATION_STATUSES = ["pending", "approved", "rejected"] as const;
 export type ClassificationStatus = typeof CLASSIFICATION_STATUSES[number];
 
-export const RELATIONSHIP_TYPES = ["QuestHasNPC", "QuestAtPlace", "NPCInPlace", "Related"] as const;
+export const RELATIONSHIP_TYPES = ["QuestHasNPC", "QuestAtPlace", "NPCInPlace", "Related", "None"] as const;
 export type RelationshipType = typeof RELATIONSHIP_TYPES[number];
 
-export const EVIDENCE_TYPES = ["Link", "Mention", "Heuristic"] as const;
+export const EVIDENCE_TYPES = ["Link", "Mention", "Heuristic", "Analyzed"] as const;
 export type EvidenceType = typeof EVIDENCE_TYPES[number];
 
 export interface EnrichmentRunTotals {
@@ -419,7 +419,10 @@ export const aiCacheEntries = pgTable("ai_cache_entries", {
   createdAt: timestamp("created_at").defaultNow(),
   lastHitAt: timestamp("last_hit_at"),
   expiresAt: timestamp("expires_at"),
-});
+}, (table) => [
+  // PRD-043: Index for efficient cache lookups
+  index("ai_cache_lookup_idx").on(table.cacheType, table.contentHash, table.algorithmVersion, table.teamId),
+]);
 
 // PRD-043: AI Algorithm Versions table - Track prompt/algorithm versions for cache invalidation
 export const aiAlgorithmVersions = pgTable("ai_algorithm_versions", {

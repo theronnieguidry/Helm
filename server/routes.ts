@@ -132,6 +132,246 @@ export function updateImportProgress(
   });
 }
 
+// PRD-043: Lazy-loaded AI cache instance for routes
+let routesAICache: import("./ai/ai-cache").AICache | null = null;
+async function getRoutesAICache() {
+  if (!routesAICache) {
+    const { createAICache } = await import("./ai/ai-cache");
+    routesAICache = createAICache(storage);
+  }
+  return routesAICache;
+}
+
+// PRD-043: Classify notes with caching for AI preview
+// Checks cache first, only sends uncached notes to AI provider,
+// then stores fresh results in cache (awaited to ensure persistence)
+async function classifyNotesWithCacheForPreview(
+  notes: Array<{ id: string; title: string; content: string; currentType: string; existingLinks: string[] }>,
+  provider: import("./ai").AIProvider,
+  teamId: string,
+  pcNames: string[],
+  progressCallback?: (current: number, total: number, currentItem?: string) => void
+): Promise<import("./ai").ClassificationResult[]> {
+  if (notes.length === 0) {
+    return [];
+  }
+
+  const cache = await getRoutesAICache();
+
+  // Phase 1: Check cache for all notes
+  const cachedResults = await cache.getClassificationsBatch(notes, pcNames, teamId);
+  const uncachedNotes = notes.filter((n) => !cachedResults.has(n.id));
+
+  // Log cache statistics (always log to help debug cache issues)
+  const cacheHits = notes.length - uncachedNotes.length;
+  console.log(`AI Preview Cache: ${cacheHits}/${notes.length} classification cache hits for team ${teamId}`);
+  if (cacheHits === 0 && notes.length > 0) {
+    console.log(`AI Preview Cache DEBUG: No classification cache hits. Cache lookup returned empty for ${notes.length} notes.`);
+  }
+
+  // Phase 2: Classify uncached notes
+  let freshResults: import("./ai").ClassificationResult[] = [];
+  if (uncachedNotes.length > 0) {
+    // Adjust progress to account for cached items
+    const adjustedCallback = progressCallback
+      ? (current: number, total: number, item?: string) => {
+          // Add cached items to progress
+          progressCallback(cacheHits + current, notes.length, item);
+        }
+      : undefined;
+
+    freshResults = await provider.classifyNotes(uncachedNotes, adjustedCallback, {
+      playerCharacterNames: pcNames,
+    });
+
+    // Phase 3: Store fresh results in cache (AWAITED to ensure persistence)
+    const cacheWrites: Promise<void>[] = [];
+    for (const result of freshResults) {
+      const note = uncachedNotes.find((n) => n.id === result.noteId);
+      if (note) {
+        cacheWrites.push(
+          cache.setClassification(note, pcNames, result, teamId).catch((err) => {
+            console.error("Failed to cache classification:", err);
+          })
+        );
+      }
+    }
+    // Wait for all cache writes to complete
+    await Promise.all(cacheWrites);
+    console.log(`AI Preview Cache: Wrote ${freshResults.length} classification entries to cache for team ${teamId}`);
+  } else if (progressCallback) {
+    // All cached - report full progress immediately
+    progressCallback(notes.length, notes.length, 'All classifications loaded from cache');
+  }
+
+  // Merge cached and fresh results, maintaining original order
+  return notes.map((n) => {
+    const cached = cachedResults.get(n.id);
+    if (cached) return cached;
+    const fresh = freshResults.find((r) => r.noteId === n.id);
+    if (fresh) return fresh;
+    // Should not happen, but fallback
+    return {
+      noteId: n.id,
+      inferredType: "Note" as const,
+      confidence: 0,
+      explanation: "Classification failed",
+      extractedEntities: [],
+    };
+  });
+}
+
+// PRD-043: Extract relationships with caching for AI preview
+// Checks cache for previously analyzed note pairs, only sends uncached pairs to AI,
+// then stores fresh results in cache (awaited to ensure persistence)
+async function extractRelationshipsWithCacheForPreview(
+  notes: Array<{
+    id: string;
+    title: string;
+    content: string;
+    inferredType: import("@shared/schema").InferredEntityType;
+    internalLinks: Array<{ targetNoteId: string; linkText: string }>;
+  }>,
+  provider: import("./ai").AIProvider,
+  teamId: string,
+  progressCallback?: (current: number, total: number, currentItem?: string) => void
+): Promise<import("./ai").RelationshipResult[]> {
+  if (notes.length < 2) {
+    return [];
+  }
+
+  const cache = await getRoutesAICache();
+
+  // Phase 1: Check cache for all note pairs
+  // Generate all unique pairs and check cache
+  const cachedRelationships: import("./ai").RelationshipResult[] = [];
+  const checkedPairs = new Set<string>();
+  const uncachedPairs: Array<{ noteA: typeof notes[0]; noteB: typeof notes[0]; pairKey: string }> = [];
+  let cacheHitCount = 0;
+
+  // Create a map for quick note lookup
+  const noteMap = new Map(notes.map(n => [n.id, n]));
+
+  // Check each pair in the cache
+  for (let i = 0; i < notes.length; i++) {
+    for (let j = i + 1; j < notes.length; j++) {
+      const noteA = notes[i];
+      const noteB = notes[j];
+      const pairKey = [noteA.id, noteB.id].sort().join('::');
+
+      if (checkedPairs.has(pairKey)) continue;
+      checkedPairs.add(pairKey);
+
+      // Check cache for this pair
+      const cached = await cache.getRelationship(noteA, noteB, teamId);
+      if (cached) {
+        cacheHitCount++;
+        // Only add to results if it's a real relationship (not "None")
+        if (cached.relationshipType !== "None") {
+          cachedRelationships.push(cached);
+        }
+        // Either way, it's a cache hit - don't re-analyze
+      } else {
+        // This pair needs analysis
+        uncachedPairs.push({ noteA, noteB, pairKey });
+      }
+    }
+  }
+
+  // Log cache statistics (always log to help debug cache issues)
+  const totalPairs = checkedPairs.size;
+  console.log(`AI Preview Cache: ${cacheHitCount}/${totalPairs} relationship cache hits for team ${teamId} (${uncachedPairs.length} pairs need analysis)`);
+  if (cacheHitCount === 0 && totalPairs > 0) {
+    console.log(`AI Preview Cache DEBUG: No relationship cache hits. Checked ${totalPairs} pairs.`);
+  }
+
+  // Phase 2: Extract relationships for uncached pairs
+  let freshResults: import("./ai").RelationshipResult[] = [];
+
+  if (uncachedPairs.length > 0) {
+    // Get unique notes that need relationship analysis
+    const uncachedNoteIds = new Set<string>();
+    for (const { noteA, noteB } of uncachedPairs) {
+      uncachedNoteIds.add(noteA.id);
+      uncachedNoteIds.add(noteB.id);
+    }
+    const uncachedNotes = notes.filter(n => uncachedNoteIds.has(n.id));
+
+    // Adjust progress callback
+    const adjustedCallback = progressCallback
+      ? (current: number, total: number, item?: string) => {
+          progressCallback(current, total, item);
+        }
+      : undefined;
+
+    freshResults = await provider.extractRelationships(uncachedNotes, adjustedCallback);
+
+    // Phase 3: Store fresh results in cache AND cache "no relationship" for pairs without results
+    const cacheWrites: Promise<void>[] = [];
+
+    // Create a set of pairs that have relationships
+    const pairsWithRelationships = new Set<string>();
+    for (const result of freshResults) {
+      const pairKey = [result.fromNoteId, result.toNoteId].sort().join('::');
+      pairsWithRelationships.add(pairKey);
+
+      const fromNote = noteMap.get(result.fromNoteId);
+      const toNote = noteMap.get(result.toNoteId);
+      if (fromNote && toNote) {
+        cacheWrites.push(
+          cache.setRelationship(fromNote, toNote, result, teamId).catch((err) => {
+            console.error("Failed to cache relationship:", err);
+          })
+        );
+      }
+    }
+
+    // Cache "no relationship" for pairs that were analyzed but had no relationship
+    let noRelationshipCount = 0;
+    for (const { noteA, noteB, pairKey } of uncachedPairs) {
+      if (!pairsWithRelationships.has(pairKey)) {
+        // This pair was analyzed but no relationship was found - cache that fact
+        const noRelationshipResult: import("./ai").RelationshipResult = {
+          fromNoteId: noteA.id,
+          toNoteId: noteB.id,
+          relationshipType: "None",
+          confidence: 1.0,
+          evidenceSnippet: "",
+          evidenceType: "Analyzed",
+        };
+        cacheWrites.push(
+          cache.setRelationship(noteA, noteB, noRelationshipResult, teamId).catch((err) => {
+            console.error("Failed to cache no-relationship:", err);
+          })
+        );
+        noRelationshipCount++;
+      }
+    }
+
+    // Wait for all cache writes to complete
+    await Promise.all(cacheWrites);
+    console.log(`AI Preview Cache: Wrote ${freshResults.length} relationships + ${noRelationshipCount} no-relationship markers to cache for team ${teamId}`);
+  } else if (progressCallback) {
+    // All cached or not enough notes - report complete
+    progressCallback(notes.length, notes.length, 'Relationships loaded from cache');
+  }
+
+  // Merge cached and fresh results, deduplicating by pair
+  const allResults = [...cachedRelationships, ...freshResults];
+  const seenPairs = new Set<string>();
+  const deduplicatedResults: import("./ai").RelationshipResult[] = [];
+
+  for (const result of allResults) {
+    const pairKey = [result.fromNoteId, result.toNoteId].sort().join('::');
+    if (!seenPairs.has(pairKey)) {
+      seenPairs.add(pairKey);
+      deduplicatedResults.push(result);
+    }
+  }
+
+  return deduplicatedResults;
+}
+
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -789,12 +1029,16 @@ export async function registerRoutes(
 
       // PRD-042: Support granular empty page exclusion with backward compatibility
       let excludedEmptyPageIds: Set<string>;
+      let importEmptyPages: boolean;
+
       if (options?.excludedEmptyPageIds && Array.isArray(options.excludedEmptyPageIds)) {
         // New format: explicit list of empty page IDs to exclude
         excludedEmptyPageIds = new Set(options.excludedEmptyPageIds);
+        // Derive importEmptyPages for record-keeping: true if no pages are excluded
+        importEmptyPages = excludedEmptyPageIds.size === 0;
       } else {
         // Legacy format: boolean importEmptyPages (defaults to true)
-        const importEmptyPages = options?.importEmptyPages !== false;
+        importEmptyPages = options?.importEmptyPages !== false;
         excludedEmptyPageIds = importEmptyPages
           ? new Set()
           : new Set(plan.pages.filter(p => p.isEmpty).map(p => p.sourcePageId));
@@ -1212,13 +1456,15 @@ export async function registerRoutes(
       const totalClassificationNotes = notesForClassification.length;
       updateImportProgress(operationId, 'classifying', 0, totalClassificationNotes, 'Starting classification...');
 
-      // Phase 1: Classify notes with AI (PRD-040: pass PC names)
-      const classificationResults = await provider.classifyNotes(
+      // PRD-043: Phase 1: Classify notes with AI (with caching)
+      const classificationResults = await classifyNotesWithCacheForPreview(
         notesForClassification,
+        provider,
+        teamId,
+        allPCNames,
         (current, total, currentItem) => {
           updateImportProgress(operationId, 'classifying', current, total, currentItem);
-        },
-        allPCNames.length > 0 ? { playerCharacterNames: allPCNames } : undefined
+        }
       );
 
       // Build a map for quick lookup
@@ -1281,9 +1527,15 @@ export async function registerRoutes(
       // PRD-035: Update progress for relationship extraction phase
       updateImportProgress(operationId, 'relationships', 0, notesWithClassifications.length, 'Analyzing relationships...');
 
-      const relationshipResults = await provider.extractRelationships(notesWithClassifications, (current, total, currentItem) => {
-        updateImportProgress(operationId, 'relationships', current, total, currentItem);
-      });
+      // PRD-043: Phase 2: Extract relationships with caching
+      const relationshipResults = await extractRelationshipsWithCacheForPreview(
+        notesWithClassifications,
+        provider,
+        teamId,
+        (current, total, currentItem) => {
+          updateImportProgress(operationId, 'relationships', current, total, currentItem);
+        }
+      );
 
       // PRD-035: Mark progress as complete
       updateImportProgress(operationId, 'complete', notesWithClassifications.length, notesWithClassifications.length, 'Analysis complete');
@@ -1653,7 +1905,8 @@ export async function registerRoutes(
       }
 
       // PRD-038: Validate overrideType if provided
-      const validTypes = ["Character", "NPC", "Area", "Quest", "SessionLog", "Note"];
+      // PRD-045: Added POI as valid manual reclassify option
+      const validTypes = ["Character", "NPC", "Area", "POI", "Quest", "SessionLog", "Note"];
       if (overrideType && !validTypes.includes(overrideType)) {
         return res.status(400).json({ message: "Invalid override type" });
       }
@@ -1707,6 +1960,7 @@ export async function registerRoutes(
           Character: "character",
           NPC: "npc",
           Area: "area",
+          POI: "poi",
           Quest: "quest",
           SessionLog: "session_log",
           Note: "note",
@@ -1760,6 +2014,7 @@ export async function registerRoutes(
           Character: "character",
           NPC: "npc",
           Area: "area",
+          POI: "poi",
           Quest: "quest",
           SessionLog: "session_log",
           Note: "note",

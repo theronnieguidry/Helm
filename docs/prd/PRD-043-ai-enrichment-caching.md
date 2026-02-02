@@ -71,10 +71,10 @@ Content normalization:
 
 ### 4. Cache Integration
 
-Cache lookup happens in the enrichment worker:
+Cache lookup happens in both the enrichment worker and the AI preview endpoint:
 1. Check cache for all notes before calling AI provider
 2. Only send uncached notes to AI
-3. Store fresh results in cache
+3. Store fresh results in cache (awaited to ensure persistence)
 4. Merge cached and fresh results
 
 ---
@@ -88,7 +88,8 @@ Cache lookup happens in the enrichment worker:
 | `server/test/memory-storage.ts` | Added MemoryStorage cache implementation for testing |
 | `server/ai/cache-versions.ts` | **New file** - Algorithm version tracking constants |
 | `server/ai/ai-cache.ts` | **New file** - Cache service with key generation and operations |
-| `server/jobs/enrichment-worker.ts` | Integrated cache lookup/storage into classification flow |
+| `server/jobs/enrichment-worker.ts` | Integrated cache lookup/storage into classification and relationship flows |
+| `server/routes.ts` | Integrated cache lookup/storage into AI preview endpoint (`/ai-preview`) for both classification and relationships |
 | `scripts/ai-cache-admin.ts` | **New file** - CLI tool for cache administration (stats, prune, invalidate) |
 | `server/ai/ai-cache.test.ts` | **New file** - Unit tests for cache system (22 tests) |
 
@@ -135,10 +136,84 @@ npx tsx scripts/ai-cache-admin.ts invalidate-team <team-id>          # Invalidat
 
 ## Implementation Notes
 
-- Cache integration happens at enrichment worker level, not inside ClaudeAIProvider
+- Cache integration happens at both enrichment worker and AI preview endpoint levels
 - Content hashing uses SHA-256 with normalization for consistency
 - PC names affect Character vs NPC classification, so they're included in context hash
 - Relationship cache uses order-independent pair hash so A→B and B→A hit same entry
 - Cache miss for expired entries happens at lookup time (no background cleanup required)
 - Hit count and lastHitAt updated on cache hits for analytics
 - Test coverage: 22 unit tests covering key generation, cache operations, and invalidation
+
+### Bug Fix: AI Preview Cache Integration (2026-01-19)
+
+**Issue**: Cache was not being used when users generated AI previews during import. Clicking Cancel and re-importing showed no cache benefit.
+
+**Root Cause**: The `/api/teams/:teamId/imports/nuclino/ai-preview` endpoint called `provider.classifyNotes()` directly without using the AI cache. Cache integration only existed in the enrichment worker (a different code path).
+
+**Fix**: Added `classifyNotesWithCacheForPreview()` helper function in `server/routes.ts` that:
+1. Checks cache for all notes before calling AI
+2. Only sends uncached notes to the AI provider
+3. Awaits all cache writes using `Promise.all()` (ensures persistence before returning)
+4. Adjusts progress callbacks to account for cached items
+
+**Verification**: Server logs show "AI Preview Cache: N/N classification cache hits" on re-imports.
+
+### Enhancement: Relationship Caching (2026-01-19)
+
+**Issue**: Relationship extraction was not cached in either the AI preview endpoint or the enrichment worker.
+
+**Fix**: Added relationship caching to both code paths:
+
+1. **AI Preview Endpoint** (`server/routes.ts`):
+   - Added `extractRelationshipsWithCacheForPreview()` helper function
+   - Checks cache for all note pairs before calling AI
+   - Only sends notes with uncached pairs to the AI provider
+   - Stores fresh relationship results per-pair in cache
+
+2. **Enrichment Worker** (`server/jobs/enrichment-worker.ts`):
+   - Added `extractRelationshipsWithCache()` function
+   - Same caching pattern as the AI preview endpoint
+   - Also fixed fire-and-forget issue in `classifyNotesWithCache()` - now uses `Promise.all()` to await cache writes
+
+**How Relationship Caching Works**:
+- For each unique pair of notes, check if we have a cached relationship
+- If any pairs are uncached, send those notes to the AI for analysis
+- Cache results per-pair using order-independent hash (A→B and B→A hit same cache entry)
+- Merge cached and fresh results, deduplicating by pair
+
+**Verification**: Server logs show "AI Cache: N relationship cache hits" on re-imports.
+
+### Bug Fix: Relationship Negative Caching (2026-01-19)
+
+**Issue**: Second import still showed many relationship cache misses. With 92 notes (~4186 possible pairs), only ~145 cache hits were occurring on re-import instead of the expected ~4186.
+
+**Root Cause**: Relationship caching only stored pairs WHERE relationships were found (~100-200 pairs). Pairs analyzed but having NO relationship were never cached, causing them to be re-analyzed every time.
+
+**Fix**: Added "negative caching" - store markers for pairs that were analyzed but had no relationship:
+
+1. **Schema Changes** (`shared/schema.ts`):
+   - Added `"None"` to `RELATIONSHIP_TYPES` array
+   - Added `"Analyzed"` to `EVIDENCE_TYPES` array
+
+2. **Cache All Analyzed Pairs** (`server/routes.ts` and `server/jobs/enrichment-worker.ts`):
+   - After AI returns results, track which pairs had relationships found
+   - For pairs WITHOUT relationships, cache a "no relationship" marker:
+     ```typescript
+     {
+       relationshipType: "None",
+       confidence: 1.0,
+       evidenceSnippet: "",
+       evidenceType: "Analyzed",
+     }
+     ```
+   - On cache lookup, "None" results mean "already analyzed, no relationship exists" → skip this pair
+
+**Verification**: Second import should now show:
+```
+AI Preview Cache: 4186/4186 relationship cache hits (0 pairs need analysis)
+```
+
+Server logs show both positive relationships and "no-relationship markers" being cached:
+```
+AI Cache: Wrote 87 relationships + 3973 no-relationship markers to cache
+```

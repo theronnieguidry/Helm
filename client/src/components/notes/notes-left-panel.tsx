@@ -278,6 +278,7 @@ export function NotesLeftPanel({
                     { value: "Character", label: "Character" },
                     { value: "NPC", label: "NPC" },
                     { value: "Area", label: "Area" },
+                    { value: "POI", label: "Point of Interest" },
                     { value: "Quest", label: "Quest" },
                     { value: "SessionLog", label: "Session Log" },
                     { value: "Note", label: "Note" },
@@ -291,7 +292,14 @@ export function NotesLeftPanel({
                           "w-full text-left px-3 py-1.5 rounded-md text-sm hover:bg-accent transition-colors",
                           isExpanded && "bg-accent"
                         )}
-                        onClick={() => setExpandedReviewId(isExpanded ? null : item.classificationId)}
+                        onClick={() => {
+                          const newExpanded = isExpanded ? null : item.classificationId;
+                          setExpandedReviewId(newExpanded);
+                          // When expanding (not collapsing), also select the note for viewing
+                          if (newExpanded && note) {
+                            onSelectNote(note);
+                          }
+                        }}
                       >
                         <div className="flex items-center gap-2">
                           <ChevronRight
