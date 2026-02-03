@@ -6,9 +6,20 @@
   "scripts": {
     "dev": "NODE_ENV=development DEV_AUTH_BYPASS=true tsx server/index.ts",
     "dev:local": "npx cross-env NODE_ENV=development DEV_AUTH_BYPASS=true tsx watch server/index.ts",
+
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
-    "check": "tsc",
+
+    "check": "npx tsc -p tsconfig.json --pretty false",
+    "typecheck": "npm run check",
+
+    "test": "npm run test:unit",
+    "test:unit": "npx vitest run",
+    "test:watch": "npx vitest",
+    "test:coverage": "npx vitest run --coverage",
+
+    "test:e2e": "npx playwright test",
+
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

@@ -8,12 +8,12 @@ These PRDs implement the "session-first, structure-later" note-taking system des
 
 | PRD | Feature | Status | Priority | Dependencies |
 |-----|---------|--------|----------|--------------|
-| [PRD-001](PRD-001-session-logs.md) | Session Logs | 🔴 To Do | P0 | None |
-| [PRD-002](PRD-002-entity-detection.md) | Entity Detection | 🔴 To Do | P1 | PRD-001 |
-| [PRD-003](PRD-003-post-session-review.md) | Post-Session Review Mode | 🔴 To Do | P1 | PRD-001, PRD-002 |
-| [PRD-004](PRD-004-quest-status-progression.md) | Quest Status Progression | 🔴 To Do | P0 | None |
-| [PRD-005](PRD-005-backlinks.md) | Backlinks | 🔴 To Do | P1 | PRD-001 |
-| [PRD-006](PRD-006-proximity-suggestions.md) | Proximity Suggestions | 🔴 To Do | P2 | PRD-002 |
+| [PRD-001](PRD-001-session-logs.md) | Session Logs | 🟢 Done | P0 | None |
+| [PRD-002](PRD-002-entity-detection.md) | Entity Detection | 🟢 Done | P1 | PRD-001 |
+| [PRD-003](PRD-003-post-session-review.md) | Post-Session Review Mode | 🟢 Done | P1 | PRD-001, PRD-002 |
+| [PRD-004](PRD-004-quest-status-progression.md) | Quest Status Progression | 🟢 Done | P0 | None |
+| [PRD-005](PRD-005-backlinks.md) | Backlinks | 🟢 Done | P1 | PRD-001 |
+| [PRD-006](PRD-006-proximity-suggestions.md) | Proximity Suggestions | 🟢 Done | P2 | PRD-002 |
 
 ### Status Legend
 - 🔴 To Do - Not started
