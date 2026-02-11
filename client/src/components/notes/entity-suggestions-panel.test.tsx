@@ -8,6 +8,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { EntitySuggestionsPanel } from "./entity-suggestions-panel";
 import type { DetectedEntity } from "@shared/entity-detection";
 
+const { mockNavigate } = vi.hoisted(() => ({
+  mockNavigate: vi.fn(),
+}));
+
 // Mock ResizeObserver
 class MockResizeObserver {
   observe = vi.fn();
@@ -25,7 +29,7 @@ afterAll(() => {
 
 // Mock wouter
 vi.mock("wouter", () => ({
-  useLocation: () => ["/", vi.fn()],
+  useLocation: () => ["/", mockNavigate],
 }));
 
 // Mock toast hook
@@ -139,6 +143,7 @@ const mockSessionNote = {
   content: "Session content",
   noteType: "session_log" as const,
   isPrivate: false,
+  parentNoteId: null,
   questStatus: null,
   contentBlocks: null,
   sessionDate: null,
@@ -173,6 +178,7 @@ function createWrapper() {
 describe("EntitySuggestionsPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockNavigate.mockReset();
     mockEntityDetectionResult = {
       entities: mockEntities,
       isLoading: false,
@@ -191,6 +197,7 @@ describe("EntitySuggestionsPanel", () => {
         team={mockTeam}
         sessionDate="2026-01-18"
         content="Lord Blackwood entered the Silverwood Forest. They must find the artifact."
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -217,6 +224,7 @@ describe("EntitySuggestionsPanel", () => {
         team={mockTeam}
         sessionDate="2026-01-18"
         content="Some content to analyze..."
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -237,6 +245,7 @@ describe("EntitySuggestionsPanel", () => {
         team={mockTeam}
         sessionDate="2026-01-18"
         content="Some content without names..."
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -253,6 +262,7 @@ describe("EntitySuggestionsPanel", () => {
         team={mockTeam}
         sessionDate="2026-01-18"
         content="Short"
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -267,6 +277,7 @@ describe("EntitySuggestionsPanel", () => {
         team={mockTeam}
         sessionDate="2026-01-18"
         content="Lord Blackwood entered the Silverwood Forest."
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -295,6 +306,7 @@ describe("EntitySuggestionsPanel", () => {
         sessionDate="2026-01-18"
         content="Lord Blackwood entered the Silverwood Forest."
         sessionNote={mockSessionNote}
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -311,6 +323,7 @@ describe("EntitySuggestionsPanel", () => {
         sessionDate="2026-01-18"
         content="Lord Blackwood entered the Silverwood Forest."
         sessionNote={mockSessionNote}
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -325,6 +338,7 @@ describe("EntitySuggestionsPanel", () => {
         team={mockTeam}
         sessionDate="2026-01-18"
         content="Lord Blackwood entered the Silverwood Forest."
+        memberAiEnabled={false}
         onNoteCreated={vi.fn()}
       />,
       { wrapper: createWrapper() }
@@ -332,5 +346,109 @@ describe("EntitySuggestionsPanel", () => {
 
     // All entities should be under "New Entities" since we don't have existing notes
     expect(screen.getByText("New Entities")).toBeInTheDocument();
+  });
+
+  it("navigates to session-review route when Review All is clicked", () => {
+    render(
+      <EntitySuggestionsPanel
+        team={mockTeam}
+        sessionDate="2026-01-18"
+        content="Lord Blackwood entered the Silverwood Forest."
+        sessionNote={mockSessionNote}
+        memberAiEnabled={false}
+        onNoteCreated={vi.fn()}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    fireEvent.click(screen.getByText("Review All"));
+    expect(mockNavigate).toHaveBeenCalledWith(`/session-review/${mockSessionNote.id}`);
+  });
+
+  it("uses note-scoped backlinks endpoint when accepting an entity", async () => {
+    const onNoteCreated = vi.fn();
+    mockApiRequest.mockImplementation(
+      async (method: string, url: string) => {
+        if (method === "POST" && url === `/api/teams/${mockTeam.id}/notes`) {
+          return {
+            json: async () => ({
+              id: "new-note-1",
+              title: "Lord Blackwood",
+            }),
+          };
+        }
+
+        if (
+          method === "POST" &&
+          url === `/api/teams/${mockTeam.id}/notes/new-note-1/backlinks`
+        ) {
+          return {
+            json: async () => ({
+              id: "backlink-1",
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }
+    );
+
+    render(
+      <EntitySuggestionsPanel
+        team={mockTeam}
+        sessionDate="2026-01-18"
+        content="Lord Blackwood entered the Silverwood Forest."
+        sessionNote={mockSessionNote}
+        memberAiEnabled={false}
+        onNoteCreated={onNoteCreated}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: /^Accept$/ })[0]);
+
+    await waitFor(() => {
+      expect(mockApiRequest).toHaveBeenCalledWith(
+        "POST",
+        `/api/teams/${mockTeam.id}/notes/new-note-1/backlinks`,
+        {
+          sourceNoteId: mockSessionNote.id,
+          textSnippet: "Lord Blackwood",
+        }
+      );
+    });
+
+    expect(onNoteCreated).toHaveBeenCalled();
+  });
+
+  it("shows AI Cleanup when member AI is enabled even without session/high-confidence actions", () => {
+    mockEntityDetectionResult = {
+      entities: [
+        {
+          id: "entity-low-1",
+          type: "quest",
+          text: "find clues",
+          normalizedText: "find clues",
+          confidence: "medium",
+          mentions: [{ startOffset: 0, endOffset: 10, text: "find clues" }],
+          frequency: 1,
+        },
+      ],
+      isLoading: false,
+      error: null,
+    };
+
+    render(
+      <EntitySuggestionsPanel
+        team={mockTeam}
+        sessionDate="2026-01-18"
+        content="The party should find clues in the old crypt before dawn to understand what happened here."
+        memberAiEnabled={true}
+        onNoteCreated={vi.fn()}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    expect(screen.getByText("AI Cleanup")).toBeInTheDocument();
   });
 });

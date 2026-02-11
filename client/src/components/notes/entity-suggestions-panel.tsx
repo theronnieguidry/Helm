@@ -275,8 +275,11 @@ export function EntitySuggestionsPanel({
     }) => {
       const response = await apiRequest(
         "POST",
-        `/api/teams/${team.id}/backlinks`,
-        data
+        `/api/teams/${team.id}/notes/${data.targetNoteId}/backlinks`,
+        {
+          sourceNoteId: data.sourceNoteId,
+          textSnippet: data.textSnippet,
+        }
       );
       return response.json();
     },
@@ -491,7 +494,7 @@ export function EntitySuggestionsPanel({
   // Navigate to session review
   const handleReviewAll = useCallback(() => {
     if (sessionNoteId) {
-      navigate(`/notes/${sessionNoteId}/review`);
+      navigate(`/session-review/${sessionNoteId}`);
     }
   }, [sessionNoteId, navigate]);
 
@@ -532,7 +535,7 @@ export function EntitySuggestionsPanel({
         <CollapsibleContent>
           <div className="mt-3 space-y-4">
             {/* Action buttons */}
-            {(highConfidenceEntities.length >= 2 || sessionNoteId || team.aiEnabled) && (
+            {(highConfidenceEntities.length >= 2 || sessionNoteId || memberAiEnabled) && (
               <div className="flex gap-2 flex-wrap">
                 {highConfidenceEntities.length >= 2 && (
                   <Button
