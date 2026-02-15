@@ -1,0 +1,1 @@
+Captain of the cavalry wings. He's a human man with shoulder length light brown hair and a pencil thin mustache and goatee. He wears plaited leather skirt and polished boots, but all of the cavalry do. He's stuck up.

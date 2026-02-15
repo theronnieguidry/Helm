@@ -1,0 +1,1 @@
+Captain of the 1st, 2nd, and 3rd wings. Heavy infantry. Missing an ear, he's an orc with greenish tinged skin and hair cut short. Prototypical square jawed guy with a short beard but looks terrible from all the scarring to his face. Where there's skin damage he has white beard hairs coming through.

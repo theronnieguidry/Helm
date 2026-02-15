@@ -1,0 +1,1 @@
+Deadeye is an Ayuvarin woman with hair tied back with a black cord, with gray streaks in her hair. She's tanned with leather armor. She's got a composite shortbow with a quiver of arrows on her hip along with a shortsword. She has a leather eyepatch across her left eye. I make a very poor showing for my first time shooting a shortbow.

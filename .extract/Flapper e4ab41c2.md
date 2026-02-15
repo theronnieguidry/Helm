@@ -1,0 +1,1 @@
+Human, but ancestry is not from around here (appears Asian). Baggy MC hammer style pants but wrapped tight around the ankles. Wearing sandals and no shirt at the moment. Goes through intricate motions that look like a violent dance that's rigid and controlled.

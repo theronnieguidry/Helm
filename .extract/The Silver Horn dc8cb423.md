@@ -1,0 +1,1 @@
+We see a sign for the Silver Horn, a tavern of decent composure. Flower boxes on the outside. Tables inside. Far nicer than the Wailing Wench. I smell fish/shellfish/butter/bread. We get a seat inside the Silver Horn. The lunch is pasta with local mussels out of the river and a butter cream sauce with cheese and herbs. We order two plates of this and a pot of tea.

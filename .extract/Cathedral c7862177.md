@@ -1,0 +1,1 @@
+The Canticles of Abadar is the book [The Rose](<The Rose f85b138a.md?n>) gave to me. I know from this book that the man I see on the stained glass is the god of civilization. He's got a big ring hanging from his belt that has keys hanging from it. He's also known as the judge of the gods, the two headed eagle, god of the first vault.

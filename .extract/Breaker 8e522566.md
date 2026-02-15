@@ -1,0 +1,1 @@
+Captain of the 5th wing - the reserves. Second in command of the Doomguard. Grizzled old dwarf in his years with walnut brown hair and streaks of gray with a dwarven beard and bangles holding it together.

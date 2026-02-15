@@ -1,0 +1,1 @@
+Beeby got the harvested fangs of a bear he killed from Shaman when we were on our [Journey with (Earl) Samwell Chilton](<Journey with (Earl) Samwell Chilton c7917edf.md?n>). He's advised to wear these in some fashion.

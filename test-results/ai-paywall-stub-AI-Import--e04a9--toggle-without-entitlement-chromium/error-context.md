@@ -1,0 +1,69 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e2]:
+  - generic [ref=e4]:
+    - generic [ref=e7]:
+      - button "Helm Test Campaign dnd" [ref=e9] [cursor=pointer]:
+        - generic [ref=e10]:
+          - img "Helm" [ref=e11]
+          - generic [ref=e12]:
+            - paragraph [ref=e13]: Test Campaign
+            - paragraph [ref=e14]: dnd
+        - img
+      - generic [ref=e16]:
+        - generic [ref=e17]: Navigation
+        - list [ref=e19]:
+          - listitem [ref=e20]:
+            - link "Dashboard" [ref=e21] [cursor=pointer]:
+              - /url: /
+              - img [ref=e22]
+              - generic [ref=e27]: Dashboard
+          - listitem [ref=e28]:
+            - link "Schedule" [ref=e29] [cursor=pointer]:
+              - /url: /schedule
+              - img [ref=e30]
+              - generic [ref=e32]: Schedule
+          - listitem [ref=e33]:
+            - link "Notes" [ref=e34] [cursor=pointer]:
+              - /url: /notes
+              - img [ref=e35]
+              - generic [ref=e37]: Notes
+          - listitem [ref=e38]:
+            - link "Dice" [ref=e39] [cursor=pointer]:
+              - /url: /dice
+              - img [ref=e40]
+              - generic [ref=e43]: Dice
+          - listitem [ref=e44]:
+            - link "Members" [ref=e45] [cursor=pointer]:
+              - /url: /members
+              - img [ref=e46]
+              - generic [ref=e51]: Members
+          - listitem [ref=e52]:
+            - link "Settings" [ref=e53] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e54]
+              - generic [ref=e57]: Settings
+      - button "TU Test User test@example.com" [ref=e59] [cursor=pointer]:
+        - generic [ref=e61]: TU
+        - generic [ref=e62]:
+          - paragraph [ref=e63]: Test User
+          - paragraph [ref=e64]: test@example.com
+    - generic [ref=e65]:
+      - banner [ref=e66]:
+        - button "Toggle Sidebar" [ref=e67] [cursor=pointer]:
+          - img
+          - generic [ref=e68]: Toggle Sidebar
+        - button "Toggle theme" [ref=e69] [cursor=pointer]:
+          - img
+          - img
+          - generic [ref=e70]: Toggle theme
+      - main [ref=e71]:
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - img [ref=e76]
+            - heading "404 Page Not Found" [level=1] [ref=e78]
+          - paragraph [ref=e79]: Did you forget to add the page to the router?
+  - region "Notifications (F8)":
+    - list
+```

@@ -1,0 +1,15 @@
+Before you changed, things were simpler and you didn't really worry too much about all the other people around the stinky city that you were staying in with Father. It is a very stinky place but not all of it is bad. Lots of smells like oxen and pigs and horses. Those don't smell bad. But even for you some of the places in this city with so many people in it are very strong.
+
+Father met with a lot of people and you'd follow him around while he went to speak to these others though you would have much rather been taking a nap on the big blanket he put on the floor for you or playing fetch with the sticks he'd throw for you. Still at least you got to smell new things even if they were bad sometimes in some of the places he'd go
+
+Father would sometimes take plants and weeds and berries and nuts and bark from sticks and make super stinky potions but after a while you got used to those. One of the places he would visit was a place like that too so you were used to it when you'd go visit there with him.
+
+When he started meeting with all of these people and talking to them it seemed to make one man in particular mad at Father. After leaving the stinky place with all the plants and treebark one time this man came up and confronted Father. You could tell he was not nice. You could smell it on him and you growled low in your throat. Father called him Castellan Felcher now that you think on it...things like that didn't used to matter to you but now they seem to stick in your head better. The mans smell was enough before but now names seem like they mean more. Anyway, Father argued with him and you were ready to bite this Castellan Felcher fellow but he eventually left. That wasn't the only time you'd see him though, he kept coming back over days and weeks and fighting with Father about things.
+
+You could smell that him that he had a smell of fear on him and a smell of anger and a smell of hmm...something else...something kind of like what you smell like when the loud noises in the sky happen when it rains but a people version of that smell. Anyway, those are some of the things that keep sticking in your head now because these men keep chasing you and trying to find you and you keep hearing them mention that same man's name.
+
+Sergeant Yarrow is the head of the group chasing me. These guys capture Legion and bring him to jail after he helps me to escape in a distraction. Constable Able is one of the other guys.
+
+The apothecary shop owner tells me that dad was asking very difficult questions and he ruffled feathers, making them very angry with him. Even My Wilhelm got into some arguments with him. He could be a very insistent, beligerent man. If he didn't get what he wanted. The castellan had been looking for him. He came by the shop a few times since he knew your father would come by here. Wilhelm and Willow Babblebrook - The Potent Posset apothecary.
+
+Castellan Freidrich Felcher, the castellan and his constables are the ones that came by asking questions, specifically to Wilhelm, he needed a tincture made, etc. while he'd deal with your father or the castellan. The castellan isn't the nicest of men.&#x20;

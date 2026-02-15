@@ -1,0 +1,7 @@
+Sister Cassandra should be able to help Isaac.
+
+A woman with a steel kite shield and a sword raised in combat smiting an undead creature (The goddess Iomedae). The whole building is built like a broad bladed sword and we're closer to the point. The priests inside are wearing white cassocks with hoods pulled up. The males are all clean shaven and largely look human. There's an occasional smaller being amongst the clergy. The piping and borders and trim are all gold. Others are in the same style but silver. On the front of their robes is another sword.
+
+Brother Justinian is the clergy member I speak to and is untrusting of us as newcomers to the city. We provide the letter of introduction in order to see Sister Cassandra. There's a woman with blonde hair pulled up and held in place by a small dagger. She has blue eyes and is wearing red outer robes and white under robes. The red outer robes are trimmed in gold. In the center of her chest is a kite shield with a sword over the front of it. The room has book cases and there are hardwood furniture items. There's a box with velvet in it and a dagger inside.
+
+I reveal to her that my dad was Alasdair MacLeod. The antioch school of divinity. He was seeking access to the atheneum of illumination. He was a bit odd and didn't seem to be familiar with "our gods" and wished to learn more about them. He attended some of the coursework in the school of divinity. We granted him access. He stayed with us for some months before traveling on.
