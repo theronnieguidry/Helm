@@ -411,10 +411,12 @@ describe("EntitySuggestionsPanel", () => {
       expect(mockApiRequest).toHaveBeenCalledWith(
         "POST",
         `/api/teams/${mockTeam.id}/notes/new-note-1/backlinks`,
-        {
+        expect.objectContaining({
           sourceNoteId: mockSessionNote.id,
           textSnippet: "Lord Blackwood",
-        }
+          evidenceType: "Mention",
+          confidence: 0.8,
+        })
       );
     });
 

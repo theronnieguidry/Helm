@@ -286,7 +286,12 @@ export const backlinks = pgTable("backlinks", {
   sourceNoteId: varchar("source_note_id").notNull(),
   sourceBlockId: varchar("source_block_id"),
   targetNoteId: varchar("target_note_id").notNull(),
+  createdByUserId: varchar("created_by_user_id"),
   textSnippet: text("text_snippet"),
+  startOffset: integer("start_offset"),
+  endOffset: integer("end_offset"),
+  evidenceType: text("evidence_type").notNull().$type<EvidenceType>().default("Mention"),
+  confidence: real("confidence").default(0.8),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -387,9 +392,12 @@ export const noteClassifications = pgTable("note_classifications", {
 // PRD-016: Note Relationships table - Detected relationships between notes
 export const noteRelationships = pgTable("note_relationships", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  enrichmentRunId: varchar("enrichment_run_id").notNull(),
+  enrichmentRunId: varchar("enrichment_run_id"),
   fromNoteId: varchar("from_note_id").notNull(),
   toNoteId: varchar("to_note_id").notNull(),
+  createdByUserId: varchar("created_by_user_id"),
+  sourceNoteId: varchar("source_note_id"),
+  sourceBlockId: varchar("source_block_id"),
   relationshipType: text("relationship_type").notNull().$type<RelationshipType>(),
   confidence: real("confidence").notNull(), // 0.0-1.0
   evidenceSnippet: text("evidence_snippet"),

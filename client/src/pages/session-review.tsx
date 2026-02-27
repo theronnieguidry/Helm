@@ -53,6 +53,7 @@ import {
   type EntityType,
 } from "@shared/entity-detection";
 import { findProximitySuggestions, type ProximitySuggestion } from "@shared/proximity-suggestions";
+import { inferRelationshipTypeForNoteTypes } from "@shared/cleanup-suggestions";
 
 interface SessionReviewPageProps {
   team: Team;
@@ -135,11 +136,42 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
 
       // Create backlink from session log to the new note
       if (sessionLog && selectedEntity) {
+        const mention = selectedEntity.mentions[0];
         createBacklinkMutation.mutate({
           targetNoteId: newNote.id,
           sourceNoteId: sessionLog.id,
-          textSnippet: selectedEntity.mentions[0]?.text || selectedEntity.text,
+          textSnippet: mention?.text || selectedEntity.text,
+          sourceBlockId: mention?.blockId,
+          startOffset: mention?.startOffset,
+          endOffset: mention?.endOffset,
+          evidenceType: "Mention",
+          confidence: 0.8,
         });
+
+        if (selectedAssociations.size > 0) {
+          const sourceType = newNote.noteType as NoteType;
+          Array.from(selectedAssociations).forEach((linkedNoteId) => {
+            const linkedNote = allNotes?.find((note) => note.id === linkedNoteId);
+            if (!linkedNote) return;
+
+            const inferred = inferRelationshipTypeForNoteTypes(sourceType, linkedNote.noteType);
+            const fromNoteId = inferred.swap ? linkedNote.id : newNote.id;
+            const toNoteId = inferred.swap ? newNote.id : linkedNote.id;
+
+            createRelationshipMutation.mutate({
+              fromNoteId,
+              toNoteId,
+              relationshipType: inferred.relationshipType,
+              evidenceType: "Heuristic",
+              confidence: 0.72,
+              sourceNoteId: sessionLog.id,
+              snippetText: mention?.text || selectedEntity.text,
+              sourceBlockId: mention?.blockId,
+              startOffset: mention?.startOffset,
+              endOffset: mention?.endOffset,
+            });
+          });
+        }
       }
 
       toast({
@@ -162,6 +194,11 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
       targetNoteId: string;
       sourceNoteId: string;
       textSnippet?: string;
+      sourceBlockId?: string;
+      startOffset?: number;
+      endOffset?: number;
+      evidenceType?: "Link" | "Mention" | "Heuristic";
+      confidence?: number;
     }) => {
       const response = await apiRequest(
         "POST",
@@ -169,6 +206,11 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
         {
           sourceNoteId: data.sourceNoteId,
           textSnippet: data.textSnippet,
+          sourceBlockId: data.sourceBlockId,
+          startOffset: data.startOffset,
+          endOffset: data.endOffset,
+          evidenceType: data.evidenceType,
+          confidence: data.confidence,
         }
       );
       return response.json();
@@ -177,6 +219,28 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
       if (selectedEntity) {
         setLinkedEntities((prev) => new Set(prev).add(selectedEntity.id));
       }
+    },
+  });
+
+  const createRelationshipMutation = useMutation({
+    mutationFn: async (data: {
+      fromNoteId: string;
+      toNoteId: string;
+      relationshipType: "QuestHasNPC" | "QuestAtPlace" | "NPCInPlace" | "Related";
+      evidenceType: "Link" | "Mention" | "Heuristic";
+      confidence: number;
+      sourceNoteId: string;
+      snippetText: string;
+      sourceBlockId?: string;
+      startOffset?: number;
+      endOffset?: number;
+    }) => {
+      const response = await apiRequest(
+        "POST",
+        `/api/teams/${team.id}/relationships`,
+        data
+      );
+      return response.json();
     },
   });
 
@@ -306,11 +370,17 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
 
   const handleLinkToExisting = (entity: DetectedEntity, noteId: string) => {
     if (!sessionLog) return;
+    const mention = entity.mentions[0];
 
     createBacklinkMutation.mutate({
       targetNoteId: noteId,
       sourceNoteId: sessionLog.id,
-      textSnippet: entity.mentions[0]?.text || entity.text,
+      textSnippet: mention?.text || entity.text,
+      sourceBlockId: mention?.blockId,
+      startOffset: mention?.startOffset,
+      endOffset: mention?.endOffset,
+      evidenceType: "Mention",
+      confidence: 0.8,
     });
     setSelectedEntity(entity);
   };

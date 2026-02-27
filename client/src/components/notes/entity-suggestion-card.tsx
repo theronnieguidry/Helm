@@ -13,7 +13,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { User, MapPin, ScrollText, Plus, X, Link2 } from "lucide-react";
+import { User, MapPin, ScrollText, Plus, X, Link2, ExternalLink } from "lucide-react";
 import type { DetectedEntity, EntityType } from "@shared/entity-detection";
 import type { Note, NoteType } from "@shared/schema";
 
@@ -69,11 +69,13 @@ interface EntitySuggestionCardProps {
   reclassifiedType?: NoteType;
   matchingNotes: Note[];
   isSelected: boolean;
+  isLinked?: boolean;
   onSelect: () => void;
   onAccept: (noteType: NoteType) => void;
   onDismiss: () => void;
   onReclassify: (newType: NoteType) => void;
   onLinkToExisting: (noteId: string) => void;
+  onOpenNote?: (noteId: string) => void;
 }
 
 export function EntitySuggestionCard({
@@ -81,11 +83,13 @@ export function EntitySuggestionCard({
   reclassifiedType,
   matchingNotes,
   isSelected,
+  isLinked = false,
   onSelect,
   onAccept,
   onDismiss,
   onReclassify,
   onLinkToExisting,
+  onOpenNote,
 }: EntitySuggestionCardProps) {
   const Icon = ENTITY_TYPE_ICONS[entity.type];
   const displayType = reclassifiedType || ENTITY_TO_NOTE_TYPE[entity.type];
@@ -171,18 +175,45 @@ export function EntitySuggestionCard({
       {/* Actions */}
       <div className="flex gap-2 mt-2">
         {hasMatch ? (
-          <Button
-            size="sm"
-            variant="default"
-            className="flex-1 h-7 text-xs"
-            onClick={(e) => {
-              e.stopPropagation();
-              onLinkToExisting(matchingNotes[0].id);
-            }}
-          >
-            <Link2 className="h-3 w-3 mr-1" />
-            Link
-          </Button>
+          isLinked ? (
+            <div className="flex flex-1 gap-1">
+              <Button
+                size="sm"
+                variant="secondary"
+                className="flex-1 h-7 text-xs"
+                disabled
+              >
+                Linked
+              </Button>
+              {onOpenNote && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs px-2"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenNote(matchingNotes[0].id);
+                  }}
+                >
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  Open
+                </Button>
+              )}
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              variant="default"
+              className="flex-1 h-7 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                onLinkToExisting(matchingNotes[0].id);
+              }}
+            >
+              <Link2 className="h-3 w-3 mr-1" />
+              Link
+            </Button>
+          )
         ) : (
           <Button
             size="sm"

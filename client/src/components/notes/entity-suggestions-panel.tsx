@@ -38,6 +38,7 @@ import type { Note, NoteType, Team } from "@shared/schema";
 import type { DetectedEntity, EntityType } from "@shared/entity-detection";
 import { matchEntitiesToNotes } from "@shared/entity-detection";
 import { findProximitySuggestions, type ProximitySuggestion } from "@shared/proximity-suggestions";
+import { inferRelationshipTypeForNoteTypes, type CleanupSuggestionsResponse } from "@shared/cleanup-suggestions";
 
 interface EntitySuggestionsPanelProps {
   team: Team;
@@ -46,6 +47,7 @@ interface EntitySuggestionsPanelProps {
   sessionNote?: Note | null; // PRD-034: Changed from sessionNoteId to pass full note
   memberAiEnabled: boolean; // PRD-028
   onNoteCreated: (note: Note) => void;
+  onOpenNote?: (noteId: string) => void;
 }
 
 export function EntitySuggestionsPanel({
@@ -55,6 +57,7 @@ export function EntitySuggestionsPanel({
   sessionNote,
   memberAiEnabled,
   onNoteCreated,
+  onOpenNote,
 }: EntitySuggestionsPanelProps) {
   // PRD-034: Derive sessionNoteId and importRunId from the session note
   const sessionNoteId = sessionNote?.id;
@@ -67,6 +70,9 @@ export function EntitySuggestionsPanel({
     new Set()
   );
   const [bulkAcceptOpen, setBulkAcceptOpen] = useState(false);
+  const [linkedExistingEntities, setLinkedExistingEntities] = useState<Set<string>>(
+    new Set()
+  );
 
   // PRD-026: AI-enhanced entities
   const [aiEntities, setAiEntities] = useState<DetectedEntity[]>([]);
@@ -105,14 +111,24 @@ export function EntitySuggestionsPanel({
   // PRD-026: AI Cleanup mutation
   const aiCleanupMutation = useMutation({
     mutationFn: async () => {
-      const response = await apiRequest(
-        "POST",
-        `/api/teams/${team.id}/extract-entities`,
-        { content }
-      );
+      const response = sessionNoteId
+        ? await apiRequest(
+            "POST",
+            `/api/teams/${team.id}/session-logs/${sessionNoteId}/cleanup-suggestions`,
+            {
+              content,
+              mode: "ai",
+              includeLow: true,
+            }
+          )
+        : await apiRequest(
+            "POST",
+            `/api/teams/${team.id}/extract-entities`,
+            { content }
+          );
       return response.json();
     },
-    onSuccess: (data: {
+    onSuccess: (data: CleanupSuggestionsResponse | {
       entities: Array<{
         name: string;
         type: "npc" | "place" | "quest" | "item" | "faction";
@@ -128,6 +144,24 @@ export function EntitySuggestionsPanel({
         confidence: number;
       }>;
     }) => {
+      if ("relationshipSuggestions" in data) {
+        setAiEntities(data.entities);
+        setAiRelationships(
+          data.relationshipSuggestions.map((relationship) => ({
+            entity1: relationship.fromEntityText,
+            entity2: relationship.toEntityText,
+            relationship: relationship.relationshipType,
+            confidence: relationship.confidence,
+          }))
+        );
+
+        toast({
+          title: "AI Cleanup Complete",
+          description: `Found ${data.entities.length} entities and ${data.relationshipSuggestions.length} relationships.`,
+        });
+        return;
+      }
+
       // Convert AI entities to DetectedEntity format
       const converted: DetectedEntity[] = data.entities.map((e, idx) => ({
         id: `ai-${idx}-${e.name.toLowerCase().replace(/\s+/g, "-")}`,
@@ -223,15 +257,16 @@ export function EntitySuggestionsPanel({
   const visibleEntities = useMemo(() => {
     return mergedEntities.filter((entity) => {
       if (persistence.isDismissed(entity.id)) return false;
-      if (persistence.isCreated(entity.id)) return false;
       return true;
     });
   }, [mergedEntities, persistence]);
 
   // Separate new entities from matched entities
   const newEntities = useMemo(() => {
-    return visibleEntities.filter((e) => !entityMatches.has(e.id));
-  }, [visibleEntities, entityMatches]);
+    return visibleEntities.filter(
+      (e) => !entityMatches.has(e.id) && !persistence.isCreated(e.id)
+    );
+  }, [visibleEntities, entityMatches, persistence]);
 
   const matchedEntities = useMemo(() => {
     return visibleEntities.filter((e) => entityMatches.has(e.id));
@@ -272,6 +307,11 @@ export function EntitySuggestionsPanel({
       targetNoteId: string;
       sourceNoteId: string;
       textSnippet: string;
+      sourceBlockId?: string;
+      startOffset?: number;
+      endOffset?: number;
+      evidenceType?: "Link" | "Mention" | "Heuristic";
+      confidence?: number;
     }) => {
       const response = await apiRequest(
         "POST",
@@ -279,7 +319,34 @@ export function EntitySuggestionsPanel({
         {
           sourceNoteId: data.sourceNoteId,
           textSnippet: data.textSnippet,
+          sourceBlockId: data.sourceBlockId,
+          startOffset: data.startOffset,
+          endOffset: data.endOffset,
+          evidenceType: data.evidenceType,
+          confidence: data.confidence,
         }
+      );
+      return response.json();
+    },
+  });
+
+  const createRelationshipMutation = useMutation({
+    mutationFn: async (data: {
+      fromNoteId: string;
+      toNoteId: string;
+      relationshipType: "QuestHasNPC" | "QuestAtPlace" | "NPCInPlace" | "Related";
+      evidenceType: "Link" | "Mention" | "Heuristic";
+      confidence: number;
+      sourceNoteId: string;
+      snippetText: string;
+      sourceBlockId?: string;
+      startOffset?: number;
+      endOffset?: number;
+    }) => {
+      const response = await apiRequest(
+        "POST",
+        `/api/teams/${team.id}/relationships`,
+        data
       );
       return response.json();
     },
@@ -289,6 +356,8 @@ export function EntitySuggestionsPanel({
   const handleAccept = useCallback(
     async (entity: DetectedEntity, noteType: NoteType) => {
       try {
+        const mention = entity.mentions[0];
+
         // Create the note
         const linkedNoteIds = Array.from(selectedAssociations);
         const newNote = await createNoteMutation.mutateAsync({
@@ -304,8 +373,37 @@ export function EntitySuggestionsPanel({
           await createBacklinkMutation.mutateAsync({
             targetNoteId: newNote.id,
             sourceNoteId: sessionNoteId,
-            textSnippet: entity.mentions[0]?.text || entity.text,
+            textSnippet: mention?.text || entity.text,
+            sourceBlockId: mention?.blockId,
+            startOffset: mention?.startOffset,
+            endOffset: mention?.endOffset,
+            evidenceType: "Mention",
+            confidence: 0.8,
           });
+        }
+
+        if (sessionNoteId && linkedNoteIds.length > 0) {
+          for (const linkedNoteId of linkedNoteIds) {
+            const linkedNote = allNotes.find((note) => note.id === linkedNoteId);
+            if (!linkedNote) continue;
+
+            const inferred = inferRelationshipTypeForNoteTypes(noteType, linkedNote.noteType);
+            const fromNoteId = inferred.swap ? linkedNote.id : newNote.id;
+            const toNoteId = inferred.swap ? newNote.id : linkedNote.id;
+
+            await createRelationshipMutation.mutateAsync({
+              fromNoteId,
+              toNoteId,
+              relationshipType: inferred.relationshipType,
+              evidenceType: "Heuristic",
+              confidence: 0.72,
+              sourceNoteId: sessionNoteId,
+              snippetText: mention?.text || entity.text,
+              sourceBlockId: mention?.blockId,
+              startOffset: mention?.startOffset,
+              endOffset: mention?.endOffset,
+            });
+          }
         }
 
         // Mark as created
@@ -330,8 +428,10 @@ export function EntitySuggestionsPanel({
       selectedAssociations,
       sessionNoteId,
       sourceImportRunId, // PRD-034
+      allNotes,
       createNoteMutation,
       createBacklinkMutation,
+      createRelationshipMutation,
       persistence,
       toast,
     ]
@@ -343,13 +443,20 @@ export function EntitySuggestionsPanel({
       if (!sessionNoteId) return;
 
       try {
+        const mention = entity.mentions[0];
         await createBacklinkMutation.mutateAsync({
           targetNoteId: noteId,
           sourceNoteId: sessionNoteId,
-          textSnippet: entity.mentions[0]?.text || entity.text,
+          textSnippet: mention?.text || entity.text,
+          sourceBlockId: mention?.blockId,
+          startOffset: mention?.startOffset,
+          endOffset: mention?.endOffset,
+          evidenceType: "Mention",
+          confidence: 0.8,
         });
 
         persistence.markCreated(entity.id);
+        setLinkedExistingEntities((prev) => new Set(prev).add(entity.id));
 
         toast({
           title: "Entity linked",
@@ -433,6 +540,7 @@ export function EntitySuggestionsPanel({
 
     for (const entity of highConfidenceEntities) {
       try {
+        const mention = entity.mentions[0];
         const noteType =
           persistence.getReclassifiedType(entity.id) ||
           ENTITY_TO_NOTE_TYPE[entity.type];
@@ -464,8 +572,37 @@ export function EntitySuggestionsPanel({
           await createBacklinkMutation.mutateAsync({
             targetNoteId: newNote.id,
             sourceNoteId: sessionNoteId,
-            textSnippet: entity.mentions[0]?.text || entity.text,
+            textSnippet: mention?.text || entity.text,
+            sourceBlockId: mention?.blockId,
+            startOffset: mention?.startOffset,
+            endOffset: mention?.endOffset,
+            evidenceType: "Mention",
+            confidence: 0.8,
           });
+        }
+
+        if (sessionNoteId && linkedNoteIds.length > 0) {
+          for (const linkedNoteId of linkedNoteIds) {
+            const linkedNote = allNotes.find((note) => note.id === linkedNoteId);
+            if (!linkedNote) continue;
+
+            const inferred = inferRelationshipTypeForNoteTypes(noteType, linkedNote.noteType);
+            const fromNoteId = inferred.swap ? linkedNote.id : newNote.id;
+            const toNoteId = inferred.swap ? newNote.id : linkedNote.id;
+
+            await createRelationshipMutation.mutateAsync({
+              fromNoteId,
+              toNoteId,
+              relationshipType: inferred.relationshipType,
+              evidenceType: "Heuristic",
+              confidence: 0.72,
+              sourceNoteId: sessionNoteId,
+              snippetText: mention?.text || entity.text,
+              sourceBlockId: mention?.blockId,
+              startOffset: mention?.startOffset,
+              endOffset: mention?.endOffset,
+            });
+          }
         }
 
         persistence.markCreated(entity.id);
@@ -486,6 +623,8 @@ export function EntitySuggestionsPanel({
     entityMatches,
     createNoteMutation,
     createBacklinkMutation,
+    createRelationshipMutation,
+    allNotes,
     sessionNoteId,
     sourceImportRunId, // PRD-034
     toast,
@@ -631,6 +770,7 @@ export function EntitySuggestionsPanel({
                           handleReclassify(entity.id, newType)
                         }
                         onLinkToExisting={() => {}}
+                        onOpenNote={onOpenNote}
                       />
                       {selectedEntityId === entity.id && (
                         <ProximityAssociations
@@ -671,6 +811,10 @@ export function EntitySuggestionsPanel({
                         )}
                         matchingNotes={matchingNotes}
                         isSelected={selectedEntityId === entity.id}
+                        isLinked={
+                          linkedExistingEntities.has(entity.id) ||
+                          persistence.isCreated(entity.id)
+                        }
                         onSelect={() => handleSelectEntity(entity)}
                         onAccept={(noteType) => handleAccept(entity, noteType)}
                         onDismiss={() => handleDismiss(entity.id)}
@@ -680,6 +824,7 @@ export function EntitySuggestionsPanel({
                         onLinkToExisting={(noteId) =>
                           handleLinkToExisting(entity, noteId)
                         }
+                        onOpenNote={onOpenNote}
                       />
                     );
                   })}

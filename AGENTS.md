@@ -11,7 +11,8 @@
 
 ## Build, Test, and Development Commands
 - `npm run dev`: Start the app in development mode on port `5000`.
-- `npm run dev:local`: Windows-friendly local dev startup (`cross-env` + watch mode).
+- `npm run dev:local`: Windows-friendly local dev startup (`cross-env`, no auto-restart).
+- `npm run dev:local:watch`: Watch mode startup (requires child-process spawn support).
 - `npm run build`: Bundle server and client into `dist/`.
 - `npm start`: Run production bundle from `dist/index.cjs`.
 - `npm run check`: Type-check with strict TypeScript settings.

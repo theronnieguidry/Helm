@@ -82,6 +82,7 @@ interface NotesEditorPanelProps {
   memberAiEnabled: boolean; // PRD-028
   onNoteCreated: (note: Note) => void;
   onNoteDeleted: (noteId: string) => void;
+  onOpenNote?: (noteId: string) => void;
 }
 
 export function NotesEditorPanel({
@@ -93,6 +94,7 @@ export function NotesEditorPanel({
   memberAiEnabled,
   onNoteCreated,
   onNoteDeleted,
+  onOpenNote,
 }: NotesEditorPanelProps) {
   const { toast } = useToast();
   const [draftTitle, setDraftTitle] = useState("");
@@ -373,6 +375,7 @@ export function NotesEditorPanel({
                 sessionNote={activeNote}
                 memberAiEnabled={memberAiEnabled}
                 onNoteCreated={onNoteCreated}
+                onOpenNote={onOpenNote}
               />
             )}
           </div>

@@ -81,7 +81,9 @@ export interface IStorage {
   // Backlinks (PRD-005)
   getBacklinks(targetNoteId: string): Promise<Backlink[]>;
   getOutgoingLinks(sourceNoteId: string): Promise<Backlink[]>;
+  getBacklink(id: string): Promise<Backlink | undefined>;
   createBacklink(backlink: InsertBacklink): Promise<Backlink>;
+  updateBacklink(id: string, data: Partial<InsertBacklink>): Promise<Backlink>;
   deleteBacklink(id: string): Promise<void>;
   deleteBacklinksBySource(sourceNoteId: string): Promise<void>;
   deleteBacklinksByTarget(targetNoteId: string): Promise<void>;
@@ -134,9 +136,11 @@ export interface IStorage {
   // PRD-016: Note Relationships
   createNoteRelationship(relationship: InsertNoteRelationship): Promise<NoteRelationship>;
   getNoteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<NoteRelationship[]>;
+  getNoteRelationship(id: string): Promise<NoteRelationship | undefined>;
   getRelationshipsForNote(noteId: string): Promise<NoteRelationship[]>;
   updateNoteRelationshipStatus(id: string, status: ClassificationStatus, userId: string): Promise<NoteRelationship>;
   bulkUpdateRelationshipStatus(ids: string[], status: ClassificationStatus, userId: string): Promise<number>;
+  deleteNoteRelationship(id: string): Promise<void>;
   deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void>;
 
   // PRD-037: Low-confidence classifications review
@@ -349,6 +353,8 @@ export class DatabaseStorage implements IStorage {
     // Also delete any backlinks referencing this note
     await db.delete(backlinks).where(eq(backlinks.sourceNoteId, id));
     await db.delete(backlinks).where(eq(backlinks.targetNoteId, id));
+    await db.delete(noteRelationships).where(eq(noteRelationships.fromNoteId, id));
+    await db.delete(noteRelationships).where(eq(noteRelationships.toNoteId, id));
     await db.delete(notes).where(eq(notes.id, id));
   }
 
@@ -527,9 +533,23 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(backlinks.createdAt));
   }
 
+  async getBacklink(id: string): Promise<Backlink | undefined> {
+    const [backlink] = await db.select().from(backlinks).where(eq(backlinks.id, id));
+    return backlink;
+  }
+
   async createBacklink(backlink: InsertBacklink): Promise<Backlink> {
     const [created] = await db.insert(backlinks).values(backlink).returning();
     return created;
+  }
+
+  async updateBacklink(id: string, data: Partial<InsertBacklink>): Promise<Backlink> {
+    const [updated] = await db
+      .update(backlinks)
+      .set(data as typeof backlinks.$inferInsert)
+      .where(eq(backlinks.id, id))
+      .returning();
+    return updated;
   }
 
   async deleteBacklink(id: string): Promise<void> {
@@ -698,6 +718,8 @@ export class DatabaseStorage implements IStorage {
     for (const note of notesToDelete) {
       await db.delete(backlinks).where(eq(backlinks.sourceNoteId, note.id));
       await db.delete(backlinks).where(eq(backlinks.targetNoteId, note.id));
+      await db.delete(noteRelationships).where(eq(noteRelationships.fromNoteId, note.id));
+      await db.delete(noteRelationships).where(eq(noteRelationships.toNoteId, note.id));
     }
 
     const result = await db
@@ -861,6 +883,14 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(noteRelationships.confidence));
   }
 
+  async getNoteRelationship(id: string): Promise<NoteRelationship | undefined> {
+    const [relationship] = await db
+      .select()
+      .from(noteRelationships)
+      .where(eq(noteRelationships.id, id));
+    return relationship;
+  }
+
   async getRelationshipsForNote(noteId: string): Promise<NoteRelationship[]> {
     const fromRelationships = await db
       .select()
@@ -893,6 +923,10 @@ export class DatabaseStorage implements IStorage {
       count++;
     }
     return count;
+  }
+
+  async deleteNoteRelationship(id: string): Promise<void> {
+    await db.delete(noteRelationships).where(eq(noteRelationships.id, id));
   }
 
   async deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void> {

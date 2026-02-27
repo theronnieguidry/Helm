@@ -12,6 +12,7 @@ import {
   buildCollectionMembership,
   classifyNuclinoPage,
   resolveNuclinoLinks,
+  summarizeNuclinoLinks,
   parseNuclinoExport,
   generateImportSummary,
   processNuclinoExport,
@@ -208,6 +209,22 @@ describe("extractNuclinoLinks", () => {
     expect(links).toHaveLength(1);
     expect(links[0].text).toBe("Long Title Page");
     expect(links[0].targetPageId).toBe("87654321");
+  });
+
+  it("extracts links without angle brackets", () => {
+    const content = "See [Kettle](Kettle 03183b35.md?n) for details.";
+    const links = extractNuclinoLinks(content);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].targetPageId).toBe("03183b35");
+  });
+
+  it("extracts URL-encoded links", () => {
+    const content = "See [Kettle](Kettle%2003183b35.md?n) for details.";
+    const links = extractNuclinoLinks(content);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].targetPageId).toBe("03183b35");
   });
 });
 
@@ -630,6 +647,52 @@ describe("resolveNuclinoLinks", () => {
 
     expect(result.resolved).toBe("[A](/notes/note-1) and [B](/notes/note-2)");
     expect(result.unresolvedLinks).toHaveLength(0);
+  });
+
+  it("resolves links without angle brackets", () => {
+    const content = "See [A](A 11111111.md?n).";
+    const pageIdToNoteId = new Map<string, string>();
+    pageIdToNoteId.set("11111111", "note-1");
+
+    const result = resolveNuclinoLinks(content, pageIdToNoteId);
+
+    expect(result.resolved).toBe("See [A](/notes/note-1).");
+    expect(result.unresolvedLinks).toHaveLength(0);
+  });
+});
+
+describe("summarizeNuclinoLinks", () => {
+  it("returns link totals and unique targets", () => {
+    const pages: NuclinoPage[] = [
+      {
+        filename: "A 11111111.md",
+        sourcePageId: "11111111",
+        title: "A",
+        content: "",
+        contentRaw: "",
+        links: [
+          { text: "B", targetFilename: "B 22222222.md", targetPageId: "22222222", fullMatch: "" },
+          { text: "C", targetFilename: "C 33333333.md", targetPageId: "33333333", fullMatch: "" },
+        ],
+        isEmpty: false,
+      },
+      {
+        filename: "B 22222222.md",
+        sourcePageId: "22222222",
+        title: "B",
+        content: "",
+        contentRaw: "",
+        links: [
+          { text: "C", targetFilename: "C 33333333.md", targetPageId: "33333333", fullMatch: "" },
+        ],
+        isEmpty: false,
+      },
+    ];
+
+    const stats = summarizeNuclinoLinks(pages);
+    expect(stats.totalLinks).toBe(3);
+    expect(stats.pagesWithLinks).toBe(2);
+    expect(stats.uniqueTargetPages).toBe(2);
   });
 });
 

@@ -4,17 +4,34 @@ import multer from "multer";
 import AdmZip from "adm-zip";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated, registerAuthRoutes } from "./replit_integrations/auth";
-import { TEAM_TYPE_DICE_MODE, SESSION_STATUSES, type TeamType, type AvailabilityStatus, type SessionStatus, type NoteType, type QuestStatus, type ImportVisibility, type ImportRunStats } from "@shared/schema";
+import {
+  TEAM_TYPE_DICE_MODE,
+  SESSION_STATUSES,
+  RELATIONSHIP_TYPES,
+  EVIDENCE_TYPES,
+  type TeamType,
+  type AvailabilityStatus,
+  type SessionStatus,
+  type NoteType,
+  type QuestStatus,
+  type ImportVisibility,
+  type ImportRunStats,
+  type RelationshipType,
+  type EvidenceType,
+} from "@shared/schema";
 import { generateSessionCandidates } from "@shared/recurrence";
 import {
   processNuclinoExport,
   resolveNuclinoLinks,
+  summarizeNuclinoLinks,
   isCollectionPage,
   type NuclinoPage,
   type PageClassification,
   type ImportSummary,
   type CollectionInfo,
 } from "@shared/nuclino-parser";
+import { buildCleanupSuggestions, inferRelationshipTypeForNoteTypes, type CleanupSuggestionMode } from "@shared/cleanup-suggestions";
+import { canonicalizeSourceBlockId } from "@shared/text-hash";
 import type {
   AIPreviewResponse,
   BaselineClassification,
@@ -24,6 +41,11 @@ import type {
   AIEnhancedSummary,
 } from "@shared/ai-preview-types";
 import { areTypesEquivalent, mapNoteTypeToInferredType } from "@shared/ai-preview-types";
+import {
+  ENABLE_CLEANUP_SUGGESTIONS_ENDPOINT,
+  ENABLE_ENTITY_DETAIL_ENDPOINT,
+  ENABLE_NUCLINO_LINK_EVIDENCE,
+} from "./feature-flags";
 
 // PRD-015: Multer config for ZIP file uploads (store in memory)
 const upload = multer({
@@ -130,6 +152,41 @@ export function updateImportProgress(
     currentItem,
     startedAt: existing?.startedAt || Date.now(),
   });
+}
+
+const RELATIONSHIP_TYPE_SET = new Set<RelationshipType>(RELATIONSHIP_TYPES);
+const EVIDENCE_TYPE_SET = new Set<EvidenceType>(EVIDENCE_TYPES);
+
+function canViewNote(note: { isPrivate: boolean | null; authorId: string }, userId: string, role: "dm" | "member"): boolean {
+  return !note.isPrivate || note.authorId === userId || role === "dm";
+}
+
+function getSessionContent(note: {
+  content?: string | null;
+  contentBlocks?: Array<{ content: string }> | null;
+}): string {
+  if (note.content && note.content.trim().length > 0) {
+    return note.content;
+  }
+  if (Array.isArray(note.contentBlocks) && note.contentBlocks.length > 0) {
+    return note.contentBlocks.map((b) => b.content || "").join("\n\n").trim();
+  }
+  return "";
+}
+
+function toSnippetPreview(snippet: string | null | undefined, fallback: string = "Referenced in a private note"): string {
+  const trimmed = (snippet || "").trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function parseIncludeLow(raw: unknown): boolean {
+  const normalized = String(raw ?? "0").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function parseSuggestionMode(raw: unknown): CleanupSuggestionMode {
+  const normalized = String(raw ?? "baseline").trim().toLowerCase();
+  return normalized === "ai" ? "ai" : "baseline";
 }
 
 // PRD-043: Lazy-loaded AI cache instance for routes
@@ -709,6 +766,209 @@ export async function registerRoutes(
     }
   });
 
+  // PRD-048: Single note detail endpoint with references and relationships
+  app.get("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const note = await storage.getNote(noteId);
+      if (!note || note.teamId !== teamId) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      if (!canViewNote(note, userId, member.role)) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      if (!ENABLE_ENTITY_DETAIL_ENDPOINT) {
+        return res.json(note);
+      }
+
+      const [referencesIn, referencesOut, relationships] = await Promise.all([
+        storage.getBacklinks(noteId),
+        storage.getOutgoingLinks(noteId),
+        storage.getRelationshipsForNote(noteId),
+      ]);
+
+      const relatedNoteIds = new Set<string>();
+      for (const ref of referencesIn) relatedNoteIds.add(ref.sourceNoteId);
+      for (const ref of referencesOut) relatedNoteIds.add(ref.targetNoteId);
+      for (const rel of relationships) {
+        relatedNoteIds.add(rel.fromNoteId);
+        relatedNoteIds.add(rel.toNoteId);
+        if (rel.sourceNoteId) relatedNoteIds.add(rel.sourceNoteId);
+      }
+
+      const relatedNotes = await Promise.all(
+        Array.from(relatedNoteIds).map(async (id) => {
+          const related = await storage.getNote(id);
+          return related ? [id, related] as const : null;
+        }),
+      );
+
+      const relatedNoteMap = new Map<string, NonNullable<Awaited<ReturnType<typeof storage.getNote>>>>();
+      for (const entry of relatedNotes) {
+        if (entry) {
+          relatedNoteMap.set(entry[0], entry[1]);
+        }
+      }
+
+      const normalizedReferencesIn = referencesIn.map((reference) => {
+        const sourceNote = relatedNoteMap.get(reference.sourceNoteId);
+        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
+        return {
+          ...reference,
+          sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
+          sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
+          sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
+          textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
+          snippetPreview: sourceVisible
+            ? toSnippetPreview(reference.textSnippet, "")
+            : "Referenced in a private note",
+        };
+      });
+
+      const normalizedReferencesOut = referencesOut.map((reference) => {
+        const targetNote = relatedNoteMap.get(reference.targetNoteId);
+        const targetVisible = targetNote ? canViewNote(targetNote, userId, member.role) : false;
+        return {
+          ...reference,
+          targetNoteTitle: targetVisible ? targetNote?.title ?? null : null,
+          targetNoteType: targetVisible ? targetNote?.noteType ?? null : null,
+          targetNoteIsPrivate: targetNote?.isPrivate ?? false,
+        };
+      });
+
+      const normalizedRelationships = relationships.map((relationship) => {
+        const fromNote = relatedNoteMap.get(relationship.fromNoteId);
+        const toNote = relatedNoteMap.get(relationship.toNoteId);
+        const sourceNote = relationship.sourceNoteId ? relatedNoteMap.get(relationship.sourceNoteId) : undefined;
+
+        const fromVisible = fromNote ? canViewNote(fromNote, userId, member.role) : false;
+        const toVisible = toNote ? canViewNote(toNote, userId, member.role) : false;
+        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : true;
+
+        return {
+          ...relationship,
+          evidenceSnippet: sourceVisible
+            ? relationship.evidenceSnippet
+            : "Referenced in a private note",
+          fromNote: fromVisible
+            ? { id: fromNote?.id, title: fromNote?.title, noteType: fromNote?.noteType }
+            : { id: relationship.fromNoteId, title: null, noteType: null, hidden: true },
+          toNote: toVisible
+            ? { id: toNote?.id, title: toNote?.title, noteType: toNote?.noteType }
+            : { id: relationship.toNoteId, title: null, noteType: null, hidden: true },
+        };
+      });
+
+      res.json({
+        ...note,
+        referencesIn: normalizedReferencesIn,
+        referencesOut: normalizedReferencesOut,
+        relationships: normalizedRelationships,
+      });
+    } catch (error) {
+      console.error("Error fetching note detail:", error);
+      res.status(500).json({ message: "Failed to fetch note detail" });
+    }
+  });
+
+  // PRD-049: Computed cleanup suggestions endpoint (GET for refresh semantics)
+  app.get("/api/teams/:teamId/session-logs/:noteId/cleanup-suggestions", isAuthenticated, async (req: any, res) => {
+    try {
+      if (!ENABLE_CLEANUP_SUGGESTIONS_ENDPOINT) {
+        return res.status(404).json({ message: "Cleanup suggestions are disabled" });
+      }
+
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+      const mode = parseSuggestionMode(req.query.mode);
+      const includeLow = parseIncludeLow(req.query.includeLow);
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const sessionNote = await storage.getNote(noteId);
+      if (!sessionNote || sessionNote.teamId !== teamId || sessionNote.noteType !== "session_log") {
+        return res.status(404).json({ message: "Session log not found" });
+      }
+
+      if (!canViewNote(sessionNote, userId, member.role)) {
+        return res.status(404).json({ message: "Session log not found" });
+      }
+
+      const allNotes = await storage.getNotes(teamId);
+      const visibleNotes = allNotes.filter((candidate) => canViewNote(candidate, userId, member.role));
+      const content = getSessionContent(sessionNote);
+
+      const suggestions = buildCleanupSuggestions({
+        content,
+        existingNotes: visibleNotes,
+        includeLow,
+        mode,
+      });
+
+      res.json(suggestions);
+    } catch (error) {
+      console.error("Error computing cleanup suggestions:", error);
+      res.status(500).json({ message: "Failed to compute cleanup suggestions" });
+    }
+  });
+
+  // PRD-049: Optional POST variant for draft-aware suggestions (idempotent compute)
+  app.post("/api/teams/:teamId/session-logs/:noteId/cleanup-suggestions", isAuthenticated, async (req: any, res) => {
+    try {
+      if (!ENABLE_CLEANUP_SUGGESTIONS_ENDPOINT) {
+        return res.status(404).json({ message: "Cleanup suggestions are disabled" });
+      }
+
+      const userId = req.user.claims.sub;
+      const { teamId, noteId } = req.params;
+      const mode = parseSuggestionMode(req.body?.mode);
+      const includeLow = parseIncludeLow(req.body?.includeLow);
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const sessionNote = await storage.getNote(noteId);
+      if (!sessionNote || sessionNote.teamId !== teamId || sessionNote.noteType !== "session_log") {
+        return res.status(404).json({ message: "Session log not found" });
+      }
+
+      if (!canViewNote(sessionNote, userId, member.role)) {
+        return res.status(404).json({ message: "Session log not found" });
+      }
+
+      const allNotes = await storage.getNotes(teamId);
+      const visibleNotes = allNotes.filter((candidate) => canViewNote(candidate, userId, member.role));
+      const requestContent = typeof req.body?.content === "string" ? req.body.content : undefined;
+      const content = requestContent ?? getSessionContent(sessionNote);
+
+      const suggestions = buildCleanupSuggestions({
+        content,
+        existingNotes: visibleNotes,
+        includeLow,
+        mode,
+      });
+
+      res.json(suggestions);
+    } catch (error) {
+      console.error("Error computing cleanup suggestions:", error);
+      res.status(500).json({ message: "Failed to compute cleanup suggestions" });
+    }
+  });
+
   // Create note
   app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
     try {
@@ -830,7 +1090,29 @@ export async function registerRoutes(
       }
 
       const backlinks = await storage.getBacklinks(noteId);
-      res.json(backlinks);
+      const sourceNotes = await Promise.all(
+        backlinks.map(async (backlink) => storage.getNote(backlink.sourceNoteId)),
+      );
+      const sourceById = new Map<string, NonNullable<Awaited<ReturnType<typeof storage.getNote>>>>();
+      for (const source of sourceNotes) {
+        if (source) {
+          sourceById.set(source.id, source);
+        }
+      }
+
+      const normalized = backlinks.map((backlink) => {
+        const sourceNote = sourceById.get(backlink.sourceNoteId);
+        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
+        return {
+          ...backlink,
+          textSnippet: sourceVisible ? backlink.textSnippet : "Referenced in a private note",
+          snippetPreview: sourceVisible
+            ? toSnippetPreview(backlink.textSnippet, "")
+            : "Referenced in a private note",
+        };
+      });
+
+      res.json(normalized);
     } catch (error) {
       console.error("Error fetching backlinks:", error);
       res.status(500).json({ message: "Failed to fetch backlinks" });
@@ -842,11 +1124,43 @@ export async function registerRoutes(
     try {
       const userId = req.user.claims.sub;
       const { teamId, noteId } = req.params;
-      const { sourceNoteId, sourceBlockId, textSnippet } = req.body;
+      const {
+        sourceNoteId,
+        sourceBlockId,
+        textSnippet,
+        startOffset,
+        endOffset,
+        evidenceType,
+        confidence,
+      } = req.body ?? {};
 
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!sourceNoteId || typeof sourceNoteId !== "string") {
+        return res.status(400).json({ message: "sourceNoteId is required" });
+      }
+
+      const parsedStartOffset = typeof startOffset === "number" ? startOffset : null;
+      const parsedEndOffset = typeof endOffset === "number" ? endOffset : null;
+      const normalizedSnippet = typeof textSnippet === "string" ? textSnippet.slice(0, 500) : "";
+
+      if (!sourceBlockId && !normalizedSnippet && parsedStartOffset === null && parsedEndOffset === null) {
+        return res.status(400).json({
+          message: "sourceBlockId or snippet evidence (textSnippet/startOffset/endOffset) is required",
+        });
+      }
+
+      const normalizedEvidenceType = (evidenceType ?? "Mention") as EvidenceType;
+      if (!EVIDENCE_TYPE_SET.has(normalizedEvidenceType)) {
+        return res.status(400).json({ message: "Invalid evidenceType" });
+      }
+
+      const normalizedConfidence = typeof confidence === "number" ? confidence : 0.8;
+      if (normalizedConfidence < 0 || normalizedConfidence > 1) {
+        return res.status(400).json({ message: "confidence must be between 0 and 1" });
       }
 
       // Verify target note exists and belongs to team
@@ -861,12 +1175,41 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Source note not found" });
       }
 
-      const backlink = await storage.createBacklink({
-        sourceNoteId,
+      const normalizedSourceBlockId = canonicalizeSourceBlockId(
         sourceBlockId,
-        targetNoteId: noteId,
-        textSnippet,
-      });
+        normalizedSnippet,
+        parsedStartOffset,
+        parsedEndOffset,
+      );
+
+      // PRD-047: Backlink dedupe upsert by (sourceNoteId, targetNoteId, sourceBlockId)
+      const existingBacklinks = await storage.getBacklinks(noteId);
+      const existing = existingBacklinks.find(
+        (backlink) =>
+          backlink.sourceNoteId === sourceNoteId &&
+          (backlink.sourceBlockId || "") === normalizedSourceBlockId,
+      );
+
+      const backlink = existing
+        ? await storage.updateBacklink(existing.id, {
+            sourceBlockId: normalizedSourceBlockId,
+            textSnippet: normalizedSnippet || null,
+            startOffset: parsedStartOffset,
+            endOffset: parsedEndOffset,
+            evidenceType: normalizedEvidenceType,
+            confidence: normalizedConfidence,
+          })
+        : await storage.createBacklink({
+            sourceNoteId,
+            sourceBlockId: normalizedSourceBlockId,
+            targetNoteId: noteId,
+            createdByUserId: userId,
+            textSnippet: normalizedSnippet || null,
+            startOffset: parsedStartOffset,
+            endOffset: parsedEndOffset,
+            evidenceType: normalizedEvidenceType,
+            confidence: normalizedConfidence,
+          });
       res.json(backlink);
     } catch (error) {
       console.error("Error creating backlink:", error);
@@ -883,6 +1226,27 @@ export async function registerRoutes(
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const backlink = await storage.getBacklink(backlinkId);
+      if (!backlink) {
+        return res.status(404).json({ message: "Backlink not found" });
+      }
+
+      const [sourceNote, targetNote] = await Promise.all([
+        storage.getNote(backlink.sourceNoteId),
+        storage.getNote(backlink.targetNoteId),
+      ]);
+      if (!sourceNote || !targetNote || sourceNote.teamId !== teamId || targetNote.teamId !== teamId) {
+        return res.status(404).json({ message: "Backlink not found" });
+      }
+
+      const canDelete =
+        member.role === "dm" ||
+        backlink.createdByUserId === userId ||
+        sourceNote.authorId === userId;
+      if (!canDelete) {
+        return res.status(403).json({ message: "Not authorized to delete this backlink" });
       }
 
       await storage.deleteBacklink(backlinkId);
@@ -910,10 +1274,178 @@ export async function registerRoutes(
       }
 
       const outgoingLinks = await storage.getOutgoingLinks(noteId);
-      res.json(outgoingLinks);
+      const targetNotes = await Promise.all(
+        outgoingLinks.map(async (backlink) => storage.getNote(backlink.targetNoteId)),
+      );
+      const targetById = new Map<string, NonNullable<Awaited<ReturnType<typeof storage.getNote>>>>();
+      for (const target of targetNotes) {
+        if (target) {
+          targetById.set(target.id, target);
+        }
+      }
+
+      const normalized = outgoingLinks.map((backlink) => {
+        const targetNote = targetById.get(backlink.targetNoteId);
+        const targetVisible = targetNote ? canViewNote(targetNote, userId, member.role) : false;
+        return {
+          ...backlink,
+          targetNoteTitle: targetVisible ? targetNote?.title ?? null : null,
+          targetNoteType: targetVisible ? targetNote?.noteType ?? null : null,
+        };
+      });
+
+      res.json(normalized);
     } catch (error) {
       console.error("Error fetching outgoing links:", error);
       res.status(500).json({ message: "Failed to fetch outgoing links" });
+    }
+  });
+
+  // PRD-047/049: Create relationship edge with required provenance/evidence
+  app.post("/api/teams/:teamId/relationships", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+      const {
+        fromNoteId,
+        toNoteId,
+        relationshipType,
+        evidenceType,
+        confidence,
+        sourceNoteId,
+        snippetText,
+        snippetId,
+        sourceBlockId,
+        startOffset,
+        endOffset,
+      } = req.body ?? {};
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!fromNoteId || !toNoteId || !relationshipType || !evidenceType || !sourceNoteId) {
+        return res.status(400).json({
+          message: "fromNoteId, toNoteId, relationshipType, evidenceType, and sourceNoteId are required",
+        });
+      }
+
+      if (fromNoteId === toNoteId) {
+        return res.status(400).json({ message: "fromNoteId and toNoteId must be different" });
+      }
+
+      if (!(snippetText || snippetId)) {
+        return res.status(400).json({ message: "snippetText or snippetId is required" });
+      }
+
+      if (!RELATIONSHIP_TYPE_SET.has(relationshipType as RelationshipType) || relationshipType === "None") {
+        return res.status(400).json({ message: "Invalid relationshipType" });
+      }
+
+      if (!EVIDENCE_TYPE_SET.has(evidenceType as EvidenceType) || evidenceType === "Analyzed") {
+        return res.status(400).json({ message: "Invalid evidenceType" });
+      }
+
+      if (typeof confidence !== "number" || confidence < 0 || confidence > 1) {
+        return res.status(400).json({ message: "confidence must be between 0 and 1" });
+      }
+
+      const [fromNote, toNote, sourceNote] = await Promise.all([
+        storage.getNote(fromNoteId),
+        storage.getNote(toNoteId),
+        storage.getNote(sourceNoteId),
+      ]);
+
+      if (!fromNote || !toNote || !sourceNote) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      if (fromNote.teamId !== teamId || toNote.teamId !== teamId || sourceNote.teamId !== teamId) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      const normalizedSnippet = typeof snippetText === "string"
+        ? snippetText.slice(0, 500)
+        : `[snippet:${String(snippetId)}]`;
+      const parsedStartOffset = typeof startOffset === "number" ? startOffset : null;
+      const parsedEndOffset = typeof endOffset === "number" ? endOffset : null;
+      const normalizedSourceBlockId = canonicalizeSourceBlockId(
+        sourceBlockId,
+        normalizedSnippet,
+        parsedStartOffset,
+        parsedEndOffset,
+      );
+
+      // Idempotent create: return existing edge for the same provenance tuple.
+      const existingForSource = await storage.getRelationshipsForNote(fromNoteId);
+      const existing = existingForSource.find((relationship) =>
+        relationship.fromNoteId === fromNoteId &&
+        relationship.toNoteId === toNoteId &&
+        relationship.relationshipType === relationshipType &&
+        relationship.sourceNoteId === sourceNoteId &&
+        (relationship.sourceBlockId || "") === normalizedSourceBlockId,
+      );
+      if (existing) {
+        return res.json(existing);
+      }
+
+      const created = await storage.createNoteRelationship({
+        enrichmentRunId: null,
+        fromNoteId,
+        toNoteId,
+        createdByUserId: userId,
+        sourceNoteId,
+        sourceBlockId: normalizedSourceBlockId,
+        relationshipType: relationshipType as RelationshipType,
+        confidence,
+        evidenceSnippet: normalizedSnippet,
+        evidenceType: evidenceType as EvidenceType,
+        status: "approved",
+        approvedByUserId: userId,
+      });
+
+      res.json(created);
+    } catch (error) {
+      console.error("Error creating relationship:", error);
+      res.status(500).json({ message: "Failed to create relationship" });
+    }
+  });
+
+  // PRD-047/049: Delete relationship edge
+  app.delete("/api/teams/:teamId/relationships/:relationshipId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, relationshipId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      const relationship = await storage.getNoteRelationship(relationshipId);
+      if (!relationship) {
+        return res.status(404).json({ message: "Relationship not found" });
+      }
+
+      const [fromNote, toNote] = await Promise.all([
+        storage.getNote(relationship.fromNoteId),
+        storage.getNote(relationship.toNoteId),
+      ]);
+      if (!fromNote || !toNote || fromNote.teamId !== teamId || toNote.teamId !== teamId) {
+        return res.status(404).json({ message: "Relationship not found" });
+      }
+
+      const canDelete = member.role === "dm" || relationship.createdByUserId === userId;
+      if (!canDelete) {
+        return res.status(403).json({ message: "Not authorized to delete this relationship" });
+      }
+
+      await storage.deleteNoteRelationship(relationshipId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting relationship:", error);
+      res.status(500).json({ message: "Failed to delete relationship" });
     }
   });
 
@@ -958,6 +1490,7 @@ export async function registerRoutes(
 
       // Process the export with party member names for PC detection
       const { pages, collections, classifications, summary } = processNuclinoExport(mdEntries, partyMemberNames);
+      const linkStats = summarizeNuclinoLinks(pages);
 
       // Generate unique import plan ID
       const importPlanId = `${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -987,6 +1520,7 @@ export async function registerRoutes(
       res.json({
         importPlanId,
         summary,
+        linkStats,
         pages: pagesList,
         detectedPCNames, // PRD-040: Return detected PC names for UI
       });
@@ -1079,6 +1613,7 @@ export async function registerRoutes(
 
       // First pass: Create all notes to get their IDs
       const sourcePageIdToNoteId = new Map<string, string>();
+      const noteTypeByNoteId = new Map<string, NoteType>();
       let created = 0;
       let updated = 0;
       let skipped = 0;
@@ -1145,6 +1680,7 @@ export async function registerRoutes(
             });
 
             sourcePageIdToNoteId.set(page.sourcePageId, updatedNote.id);
+            noteTypeByNoteId.set(updatedNote.id, noteType);
             updated++;
           } else {
             // Create new note with PRD-015A fields
@@ -1166,6 +1702,7 @@ export async function registerRoutes(
             });
 
             sourcePageIdToNoteId.set(page.sourcePageId, newNote.id);
+            noteTypeByNoteId.set(newNote.id, noteType);
             created++;
           }
         } catch (err) {
@@ -1203,19 +1740,80 @@ export async function registerRoutes(
           warnings.push(`Unresolved link in "${page.title}": ${linkText}`);
         }
 
-        // Create note_links (backlinks) for resolved links
+        // PRD-050: Store explicit Nuclino links as relationship evidence (or backlinks when flag disabled).
         for (const link of page.links) {
           const targetNoteId = sourcePageIdToNoteId.get(link.targetPageId);
           if (targetNoteId && targetNoteId !== noteId) {
             try {
-              await storage.createBacklink({
-                sourceNoteId: noteId,
-                targetNoteId,
-                textSnippet: link.text,
-              });
+              const sourceBlockId = canonicalizeSourceBlockId(
+                undefined,
+                `${link.text}|${link.fullMatch}`,
+                null,
+                null,
+              );
+
+              if (ENABLE_NUCLINO_LINK_EVIDENCE) {
+                const fromType = noteTypeByNoteId.get(noteId) || "note";
+                const toType = noteTypeByNoteId.get(targetNoteId) || "note";
+                const inferred = inferRelationshipTypeForNoteTypes(fromType, toType);
+
+                const existingRelationships = await storage.getRelationshipsForNote(noteId);
+                const existingRelationship = existingRelationships.find(
+                  (relationship) =>
+                    relationship.fromNoteId === noteId &&
+                    relationship.toNoteId === targetNoteId &&
+                    relationship.relationshipType === inferred.relationshipType &&
+                    relationship.sourceNoteId === noteId &&
+                    (relationship.sourceBlockId || "") === sourceBlockId,
+                );
+
+                if (!existingRelationship) {
+                  await storage.createNoteRelationship({
+                    enrichmentRunId: null,
+                    fromNoteId: noteId,
+                    toNoteId: targetNoteId,
+                    createdByUserId: userId,
+                    sourceNoteId: noteId,
+                    sourceBlockId,
+                    relationshipType: inferred.relationshipType,
+                    confidence: 0.92,
+                    evidenceSnippet: link.text.slice(0, 500),
+                    evidenceType: "Link",
+                    status: "approved",
+                    approvedByUserId: userId,
+                  });
+                }
+              } else {
+                const existingBacklinks = await storage.getBacklinks(targetNoteId);
+                const existingBacklink = existingBacklinks.find(
+                  (backlink) =>
+                    backlink.sourceNoteId === noteId &&
+                    (backlink.sourceBlockId || "") === sourceBlockId,
+                );
+
+                if (existingBacklink) {
+                  await storage.updateBacklink(existingBacklink.id, {
+                    sourceBlockId,
+                    textSnippet: link.text.slice(0, 500),
+                    evidenceType: "Link",
+                    confidence: 0.92,
+                  });
+                } else {
+                  await storage.createBacklink({
+                    sourceNoteId: noteId,
+                    sourceBlockId,
+                    targetNoteId,
+                    createdByUserId: userId,
+                    textSnippet: link.text.slice(0, 500),
+                    evidenceType: "Link",
+                    confidence: 0.92,
+                  });
+                }
+              }
+
               linksResolved++;
             } catch (err) {
-              // Ignore duplicate backlink errors
+              // Continue import on relationship/backlink evidence write errors.
             }
           }
         }

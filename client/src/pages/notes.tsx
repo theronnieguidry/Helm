@@ -142,6 +142,11 @@ export default function NotesPage({ team }: NotesPageProps) {
     }
   };
 
+  const handleOpenNote = (noteId: string) => {
+    setSelectedNoteId(noteId);
+    setIsTodayMode(false);
+  };
+
   if (isLoading) {
     return (
       <div className="h-[calc(100vh-4rem)] flex">
@@ -213,6 +218,7 @@ export default function NotesPage({ team }: NotesPageProps) {
             memberAiEnabled={currentMember?.aiEnabled ?? false}
             onNoteCreated={handleNoteCreated}
             onNoteDeleted={handleNoteDeleted}
+            onOpenNote={handleOpenNote}
           />
         </ResizablePanel>
       </ResizablePanelGroup>

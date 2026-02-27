@@ -56,7 +56,8 @@ When `DEV_AUTH_BYPASS=true` is set, authentication is bypassed and you're automa
 | `docker compose -f dev/docker-compose.yml up -d` | Start PostgreSQL |
 | `docker compose -f dev/docker-compose.yml down` | Stop PostgreSQL |
 | `docker compose -f dev/docker-compose.yml down -v` | Stop and delete data |
-| `npm run dev:local` | Start dev server (Windows-compatible) |
+| `npm run dev:local` | Start dev server (Windows-compatible, no auto-restart) |
+| `npm run dev:local:watch` | Start dev server with file watching (requires working child-process spawn support) |
 | `npm run db:push` | Sync database schema |
 
 ## Troubleshooting

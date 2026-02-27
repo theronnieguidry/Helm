@@ -389,6 +389,11 @@ export class MemoryStorage implements IStorage {
         this.backlinks.delete(backlinkId);
       }
     }
+    for (const [relationshipId, relationship] of Array.from(this.noteRelationshipsMap.entries())) {
+      if (relationship.fromNoteId === id || relationship.toNoteId === id) {
+        this.noteRelationshipsMap.delete(relationshipId);
+      }
+    }
     this.notes.delete(id);
   }
 
@@ -567,6 +572,10 @@ export class MemoryStorage implements IStorage {
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
 
+  async getBacklink(id: string): Promise<Backlink | undefined> {
+    return this.backlinks.get(id);
+  }
+
   async createBacklink(backlink: InsertBacklink): Promise<Backlink> {
     const id = generateId();
     const newBacklink: Backlink = {
@@ -574,11 +583,31 @@ export class MemoryStorage implements IStorage {
       sourceNoteId: backlink.sourceNoteId,
       sourceBlockId: backlink.sourceBlockId ?? null,
       targetNoteId: backlink.targetNoteId,
+      createdByUserId: backlink.createdByUserId ?? null,
       textSnippet: backlink.textSnippet ?? null,
+      startOffset: backlink.startOffset ?? null,
+      endOffset: backlink.endOffset ?? null,
+      evidenceType: validateEvidenceType(backlink.evidenceType ?? "Mention"),
+      confidence: backlink.confidence ?? 0.8,
       createdAt: new Date(),
     };
     this.backlinks.set(id, newBacklink);
     return newBacklink;
+  }
+
+  async updateBacklink(id: string, data: Partial<InsertBacklink>): Promise<Backlink> {
+    const backlink = this.backlinks.get(id);
+    if (!backlink) throw new Error("Backlink not found");
+    const updated: Backlink = {
+      ...backlink,
+      ...data,
+      evidenceType: data.evidenceType ? validateEvidenceType(data.evidenceType) : backlink.evidenceType,
+      startOffset: data.startOffset ?? backlink.startOffset,
+      endOffset: data.endOffset ?? backlink.endOffset,
+      confidence: data.confidence ?? backlink.confidence,
+    } as Backlink;
+    this.backlinks.set(id, updated);
+    return updated;
   }
 
   async deleteBacklink(id: string): Promise<void> {
@@ -933,9 +962,12 @@ export class MemoryStorage implements IStorage {
     const evidenceType = validateEvidenceType(relationship.evidenceType);
     const newRelationship: NoteRelationship = {
       id,
-      enrichmentRunId: relationship.enrichmentRunId,
+      enrichmentRunId: relationship.enrichmentRunId ?? null,
       fromNoteId: relationship.fromNoteId,
       toNoteId: relationship.toNoteId,
+      createdByUserId: relationship.createdByUserId ?? null,
+      sourceNoteId: relationship.sourceNoteId ?? null,
+      sourceBlockId: relationship.sourceBlockId ?? null,
       relationshipType,
       confidence: relationship.confidence,
       evidenceSnippet: relationship.evidenceSnippet ?? null,
@@ -953,6 +985,10 @@ export class MemoryStorage implements IStorage {
     return Array.from(this.noteRelationshipsMap.values())
       .filter(r => r.enrichmentRunId === enrichmentRunId)
       .sort((a, b) => b.confidence - a.confidence);
+  }
+
+  async getNoteRelationship(id: string): Promise<NoteRelationship | undefined> {
+    return this.noteRelationshipsMap.get(id);
   }
 
   async getRelationshipsForNote(noteId: string): Promise<NoteRelationship[]> {
@@ -980,6 +1016,10 @@ export class MemoryStorage implements IStorage {
       count++;
     }
     return count;
+  }
+
+  async deleteNoteRelationship(id: string): Promise<void> {
+    this.noteRelationshipsMap.delete(id);
   }
 
   async deleteRelationshipsByEnrichmentRun(enrichmentRunId: string): Promise<void> {

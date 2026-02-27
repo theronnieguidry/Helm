@@ -74,6 +74,11 @@ interface ParsedPage {
 interface ParseResponse {
   importPlanId: string;
   summary: ImportSummary;
+  linkStats?: {
+    totalLinks: number;
+    pagesWithLinks: number;
+    uniqueTargetPages: number;
+  };
   pages: ParsedPage[];
   detectedPCNames?: string[]; // PRD-040: PC names from team member settings
 }
@@ -573,7 +578,7 @@ export function NuclinoImportDialog({
 
   const renderPreviewState = () => {
     if (!parseResult) return null;
-    const { summary, pages } = parseResult;
+    const { summary, pages, linkStats } = parseResult;
 
     return (
       <>
@@ -624,6 +629,12 @@ export function NuclinoImportDialog({
             <span>{summary.notes} general notes</span>
             <span>·</span>
             <span>{summary.emptyPages} empty pages</span>
+            {linkStats && (
+              <>
+                <span>·</span>
+                <span>{linkStats.totalLinks} links ({linkStats.uniqueTargetPages} unique targets)</span>
+              </>
+            )}
           </div>
 
           {/* PRD-042: Expandable empty pages section */}

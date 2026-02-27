@@ -48,6 +48,12 @@ export interface ImportSummary {
   notes: number;
 }
 
+export interface NuclinoLinkStats {
+  totalLinks: number;
+  pagesWithLinks: number;
+  uniqueTargetPages: number;
+}
+
 // Known collection page names for auto-detection
 const PEOPLE_COLLECTION_PATTERNS = [
   /^notable\s*people$/i,
@@ -173,6 +179,33 @@ export function decodeHtmlEntities(text: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
+function safelyDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeNuclinoLinkTarget(rawTarget: string): string {
+  const withoutBrackets = rawTarget.trim().replace(/^<|>$/g, "");
+  const decoded = safelyDecodeUri(withoutBrackets);
+  return decoded
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/^\.\.\//, "")
+    .trim();
+}
+
+function parseTargetPageId(target: string): string | null {
+  const withoutQuery = target.split("?")[0].split("#")[0];
+  if (!/\.md$/i.test(withoutQuery)) {
+    return null;
+  }
+  const { sourcePageId } = parseNuclinoFilename(withoutQuery);
+  return sourcePageId || null;
+}
+
 /**
  * Extract internal links from Nuclino markdown content.
  *
@@ -182,22 +215,28 @@ export function decodeHtmlEntities(text: string): string {
 export function extractNuclinoLinks(content: string): NuclinoLink[] {
   const links: NuclinoLink[] = [];
 
-  // Match: [text](<filename with spaces abc12345.md?n>)
-  // The angle brackets allow spaces in the URL
-  const linkRegex = /\[([^\]]+)\]\(<([^>]+\.md(?:\?n)?)\s*>\)/g;
+  // Match markdown links with or without angle brackets.
+  // Supports:
+  // [Text](<Some Page abc12345.md?n>)
+  // [Text](Some Page abc12345.md?n)
+  // [Text](./Some%20Page%20abc12345.md)
+  const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
 
   let match;
   while ((match = linkRegex.exec(content)) !== null) {
-    const [fullMatch, text, targetFilename] = match;
+    const [fullMatch, text, rawTarget] = match;
+    const normalizedTarget = normalizeNuclinoLinkTarget(rawTarget);
+    const targetPageId = parseTargetPageId(normalizedTarget);
+    if (!targetPageId) {
+      continue;
+    }
 
-    // Extract the page ID from the target filename
-    const filenameWithoutQuery = targetFilename.replace(/\?n$/, "");
-    const { sourcePageId } = parseNuclinoFilename(filenameWithoutQuery);
+    const filenameWithoutQuery = normalizedTarget.split("?")[0].split("#")[0];
 
     links.push({
       text,
       targetFilename: filenameWithoutQuery,
-      targetPageId: sourcePageId,
+      targetPageId,
       fullMatch,
     });
   }
@@ -400,12 +439,15 @@ export function resolveNuclinoLinks(
 ): { resolved: string; unresolvedLinks: string[] } {
   const unresolvedLinks: string[] = [];
 
-  // Match Nuclino link format: [text](<filename abc12345.md?n>)
+  // Match markdown links and resolve only Nuclino-style .md targets.
   const resolved = content.replace(
-    /\[([^\]]+)\]\(<([^>]+\.md(?:\?n)?)\s*>\)/g,
-    (fullMatch, text, targetFilename) => {
-      const filenameWithoutQuery = targetFilename.replace(/\?n$/, "");
-      const { sourcePageId } = parseNuclinoFilename(filenameWithoutQuery);
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    (fullMatch, text, rawTarget) => {
+      const normalizedTarget = normalizeNuclinoLinkTarget(rawTarget);
+      const sourcePageId = parseTargetPageId(normalizedTarget);
+      if (!sourcePageId) {
+        return fullMatch;
+      }
 
       const noteId = pageIdToNoteId.get(sourcePageId);
 
@@ -421,6 +463,28 @@ export function resolveNuclinoLinks(
   );
 
   return { resolved, unresolvedLinks };
+}
+
+export function summarizeNuclinoLinks(pages: NuclinoPage[]): NuclinoLinkStats {
+  const targetPages = new Set<string>();
+  let totalLinks = 0;
+  let pagesWithLinks = 0;
+
+  for (const page of pages) {
+    if (page.links.length > 0) {
+      pagesWithLinks++;
+    }
+    totalLinks += page.links.length;
+    for (const link of page.links) {
+      targetPages.add(link.targetPageId);
+    }
+  }
+
+  return {
+    totalLinks,
+    pagesWithLinks,
+    uniqueTargetPages: targetPages.size,
+  };
 }
 
 /**
