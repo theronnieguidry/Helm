@@ -372,20 +372,42 @@ export async function registerTestRoutes(
         }
       }
 
-      const normalizedReferencesIn = referencesIn.map((reference) => {
-        const sourceNote = relatedById.get(reference.sourceNoteId);
-        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
-        return {
-          ...reference,
-          sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
-          sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
-          sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
-          textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
-          snippetPreview: sourceVisible
-            ? toSnippetPreview(reference.textSnippet, "")
-            : "Referenced in a private note",
-        };
-      });
+      // PRD-048 FR-1b: include author names for reference entries
+      const teamMembersWithUsers = await storage.getTeamMembers(teamId);
+      const memberNameByUserId = new Map<string, string>();
+      for (const teamMember of teamMembersWithUsers) {
+        const name = [teamMember.user?.firstName, teamMember.user?.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        memberNameByUserId.set(teamMember.userId, name || teamMember.user?.email || "Unknown");
+      }
+
+      const normalizedReferencesIn = referencesIn
+        .map((reference) => {
+          const sourceNote = relatedById.get(reference.sourceNoteId);
+          const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
+          return {
+            ...reference,
+            sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
+            sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
+            sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
+            sourceNoteSessionDate: sourceVisible ? sourceNote?.sessionDate ?? null : null,
+            createdByName: reference.createdByUserId
+              ? memberNameByUserId.get(reference.createdByUserId) ?? null
+              : null,
+            textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
+            snippetPreview: sourceVisible
+              ? toSnippetPreview(reference.textSnippet, "")
+              : "Referenced in a private note",
+          };
+        })
+        // PRD-048 FR-2: order by most recent session date, then creation time
+        .sort((a, b) => {
+          const aDate = a.sourceNoteSessionDate ?? a.createdAt;
+          const bDate = b.sourceNoteSessionDate ?? b.createdAt;
+          return new Date(bDate ?? 0).getTime() - new Date(aDate ?? 0).getTime();
+        });
 
       const normalizedReferencesOut = referencesOut.map((reference) => {
         const targetNote = relatedById.get(reference.targetNoteId);

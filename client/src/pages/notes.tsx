@@ -216,6 +216,7 @@ export default function NotesPage({ team }: NotesPageProps) {
             todaySession={todaySession}
             isTodayMode={isTodayMode}
             memberAiEnabled={currentMember?.aiEnabled ?? false}
+            memberRole={currentMember?.role}
             onNoteCreated={handleNoteCreated}
             onNoteDeleted={handleNoteDeleted}
             onOpenNote={handleOpenNote}

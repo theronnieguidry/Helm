@@ -67,6 +67,16 @@ export interface BuildCleanupSuggestionsInput {
   mode: CleanupSuggestionMode;
 }
 
+/**
+ * PRD-048 FR-4: seed content for entities created from session mentions so new
+ * entity pages are never blank. Only intended for use when content is empty.
+ */
+export function buildFirstSeenSeed(sessionLabel: string, snippet: string): string {
+  const trimmed = snippet.trim();
+  const truncated = trimmed.length > 240 ? `${trimmed.slice(0, 237)}...` : trimmed;
+  return `## First seen\n- Session ${sessionLabel}: "${truncated}"`;
+}
+
 const QUEST_ACTION_PATTERNS = [
   /\b(Find|Defeat|Retrieve|Rescue|Discover|Destroy|Recover|Investigate|Escort)\s+the\s+([A-Za-z][^.!?\n]{2,90})/g,
   /\b(Find|Defeat|Retrieve|Rescue|Discover|Destroy|Recover|Investigate|Escort)\s+([A-Z][A-Za-z0-9' -]{2,90})/g,
@@ -87,7 +97,7 @@ function confidenceValue(level: "high" | "medium" | "low"): number {
   return 0.58;
 }
 
-function confidenceBucket(confidence: number): ConfidenceBucket {
+export function confidenceBucket(confidence: number): ConfidenceBucket {
   if (confidence >= 0.8) return "HIGH";
   if (confidence >= 0.65) return "REVIEW";
   return "LOW";

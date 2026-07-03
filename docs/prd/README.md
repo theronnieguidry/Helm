@@ -15,6 +15,15 @@ These PRDs implement the "session-first, structure-later" note-taking system des
 | [PRD-005](PRD-005-backlinks.md) | Backlinks | 🔴 To Do | P1 | PRD-001 |
 | [PRD-006](PRD-006-proximity-suggestions.md) | Proximity Suggestions | 🔴 To Do | P2 | PRD-002 |
 
+### Note-Taking Completion (Issues #1-#4)
+
+| PRD | Feature | Status |
+|-----|---------|--------|
+| [PRD-047](PRD-047-session-ai-cleanup-link-existing-entity-backlinks.md) | Link Existing Entity → Backlinks + Evidence | 🟢 Done |
+| [PRD-048](PRD-048-entity-pages-content-references-relationships.md) | Entity Pages: Content + References + Relationships | 🟢 Done |
+| [PRD-049](PRD-049-session-ai-cleanup-relationships-quest-promotion.md) | Persist Relationships + Quest Promotion | 🟢 Done |
+| [PRD-050](PRD-050-nuclino-import-link-normalization-link-evidence.md) | Nuclino Link Normalization + Link Evidence | 🟢 Done |
+
 ### Status Legend
 - 🔴 To Do - Not started
 - 🟡 In Progress - Implementation underway

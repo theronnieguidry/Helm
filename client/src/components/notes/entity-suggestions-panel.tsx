@@ -34,11 +34,25 @@ import { useSuggestionPersistence } from "@/hooks/use-suggestion-persistence";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { EntitySuggestionCard, ENTITY_TO_NOTE_TYPE } from "./entity-suggestion-card";
 import { ProximityAssociations } from "./proximity-associations";
+import {
+  RelationshipSuggestionsSection,
+  type RelationshipSuggestionStatus,
+} from "./relationship-suggestions-section";
+import {
+  QuestPromotionSection,
+  type QuestSuggestionStatus,
+} from "./quest-promotion-section";
 import type { Note, NoteType, Team } from "@shared/schema";
 import type { DetectedEntity, EntityType } from "@shared/entity-detection";
 import { matchEntitiesToNotes } from "@shared/entity-detection";
 import { findProximitySuggestions, type ProximitySuggestion } from "@shared/proximity-suggestions";
-import { inferRelationshipTypeForNoteTypes, type CleanupSuggestionsResponse } from "@shared/cleanup-suggestions";
+import {
+  buildFirstSeenSeed,
+  inferRelationshipTypeForNoteTypes,
+  type CleanupQuestSuggestion,
+  type CleanupRelationshipSuggestion,
+  type CleanupSuggestionsResponse,
+} from "@shared/cleanup-suggestions";
 
 interface EntitySuggestionsPanelProps {
   team: Team;
@@ -73,6 +87,20 @@ export function EntitySuggestionsPanel({
   const [linkedExistingEntities, setLinkedExistingEntities] = useState<Set<string>>(
     new Set()
   );
+  // PRD-047 FR-2/FR-3: track created backlinks so we can show evidence and undo.
+  const [linkedBacklinks, setLinkedBacklinks] = useState<
+    Map<string, { backlinkId: string; snippet: string }>
+  >(new Map());
+  // PRD-049: full cleanup suggestions response (relationships + quest promotion)
+  const [cleanupData, setCleanupData] = useState<CleanupSuggestionsResponse | null>(null);
+  const [relationshipStatus, setRelationshipStatus] = useState<
+    Map<string, RelationshipSuggestionStatus>
+  >(new Map());
+  const [questStatus, setQuestStatus] = useState<Map<string, QuestSuggestionStatus>>(
+    new Map()
+  );
+  const [pendingRelationshipId, setPendingRelationshipId] = useState<string | null>(null);
+  const [pendingQuestId, setPendingQuestId] = useState<string | null>(null);
 
   // PRD-026: AI-enhanced entities
   const [aiEntities, setAiEntities] = useState<DetectedEntity[]>([]);
@@ -146,6 +174,7 @@ export function EntitySuggestionsPanel({
     }) => {
       if ("relationshipSuggestions" in data) {
         setAiEntities(data.entities);
+        setCleanupData(data);
         setAiRelationships(
           data.relationshipSuggestions.map((relationship) => ({
             entity1: relationship.fromEntityText,
@@ -157,7 +186,7 @@ export function EntitySuggestionsPanel({
 
         toast({
           title: "AI Cleanup Complete",
-          description: `Found ${data.entities.length} entities and ${data.relationshipSuggestions.length} relationships.`,
+          description: `Found ${data.entities.length} entities, ${data.relationshipSuggestions.length} relationships, and ${data.questSuggestions.length} quest suggestions.`,
         });
         return;
       }
@@ -330,6 +359,16 @@ export function EntitySuggestionsPanel({
     },
   });
 
+  // PRD-047 FR-3: undo removes the backlink created by Link
+  const deleteBacklinkMutation = useMutation({
+    mutationFn: async (backlinkId: string) => {
+      await apiRequest(
+        "DELETE",
+        `/api/teams/${team.id}/backlinks/${backlinkId}`
+      );
+    },
+  });
+
   const createRelationshipMutation = useMutation({
     mutationFn: async (data: {
       fromNoteId: string;
@@ -352,6 +391,28 @@ export function EntitySuggestionsPanel({
     },
   });
 
+  // PRD-047: capture a bounded evidence window around a mention (±200 chars)
+  const extractEvidenceSnippet = useCallback(
+    (
+      mention: { startOffset: number; endOffset: number; text: string } | undefined,
+      fallback: string
+    ): string => {
+      if (!mention || !content) return fallback;
+      const start = Math.max(0, mention.startOffset - 200);
+      const end = Math.min(content.length, mention.endOffset + 200);
+      const snippet = content.slice(start, end).replace(/\s+/g, " ").trim();
+      return snippet || fallback;
+    },
+    [content]
+  );
+
+  // PRD-049 FR-4: refresh suggestions after link/accept actions without a reload
+  const refreshCleanupSuggestions = useCallback(() => {
+    if (cleanupData && sessionNoteId && !aiCleanupMutation.isPending) {
+      aiCleanupMutation.mutate();
+    }
+  }, [cleanupData, sessionNoteId, aiCleanupMutation]);
+
   // Handle accept action
   const handleAccept = useCallback(
     async (entity: DetectedEntity, noteType: NoteType) => {
@@ -362,7 +423,11 @@ export function EntitySuggestionsPanel({
         const linkedNoteIds = Array.from(selectedAssociations);
         const newNote = await createNoteMutation.mutateAsync({
           title: entity.text,
-          content: "",
+          // PRD-048 FR-4: seed content so new entity pages are never blank
+          content: buildFirstSeenSeed(
+            sessionDate,
+            extractEvidenceSnippet(mention, entity.text)
+          ),
           noteType,
           linkedNoteIds: linkedNoteIds.length > 0 ? linkedNoteIds : undefined,
           importRunId: sourceImportRunId, // PRD-034: Track import origin for cascade delete
@@ -373,7 +438,7 @@ export function EntitySuggestionsPanel({
           await createBacklinkMutation.mutateAsync({
             targetNoteId: newNote.id,
             sourceNoteId: sessionNoteId,
-            textSnippet: mention?.text || entity.text,
+            textSnippet: extractEvidenceSnippet(mention, entity.text),
             sourceBlockId: mention?.blockId,
             startOffset: mention?.startOffset,
             endOffset: mention?.endOffset,
@@ -417,6 +482,9 @@ export function EntitySuggestionsPanel({
           title: "Entity created",
           description: `${newNote.title} has been created.`,
         });
+
+        // PRD-049 FR-4: newly created notes can resolve pending suggestions
+        refreshCleanupSuggestions();
       } catch {
         toast({
           title: "Failed to create entity",
@@ -428,26 +496,30 @@ export function EntitySuggestionsPanel({
       selectedAssociations,
       sessionNoteId,
       sourceImportRunId, // PRD-034
+      sessionDate,
       allNotes,
       createNoteMutation,
       createBacklinkMutation,
       createRelationshipMutation,
       persistence,
       toast,
+      extractEvidenceSnippet,
+      refreshCleanupSuggestions,
     ]
   );
 
-  // Handle link to existing
+  // Handle link to existing (PRD-047 FR-1: user-confirmed links are HIGH confidence)
   const handleLinkToExisting = useCallback(
     async (entity: DetectedEntity, noteId: string) => {
       if (!sessionNoteId) return;
 
       try {
         const mention = entity.mentions[0];
-        await createBacklinkMutation.mutateAsync({
+        const snippet = extractEvidenceSnippet(mention, entity.text);
+        const backlink = await createBacklinkMutation.mutateAsync({
           targetNoteId: noteId,
           sourceNoteId: sessionNoteId,
-          textSnippet: mention?.text || entity.text,
+          textSnippet: snippet,
           sourceBlockId: mention?.blockId,
           startOffset: mention?.startOffset,
           endOffset: mention?.endOffset,
@@ -457,11 +529,20 @@ export function EntitySuggestionsPanel({
 
         persistence.markCreated(entity.id);
         setLinkedExistingEntities((prev) => new Set(prev).add(entity.id));
+        // PRD-047 FR-2/FR-3: remember the backlink for inline evidence + undo
+        if (backlink?.id) {
+          setLinkedBacklinks((prev) =>
+            new Map(prev).set(entity.id, { backlinkId: backlink.id, snippet })
+          );
+        }
 
         toast({
           title: "Entity linked",
           description: "Backlink created to existing note.",
         });
+
+        // PRD-049 FR-4: linked entities can resolve pending relationship suggestions
+        refreshCleanupSuggestions();
       } catch {
         toast({
           title: "Failed to link entity",
@@ -469,8 +550,206 @@ export function EntitySuggestionsPanel({
         });
       }
     },
-    [sessionNoteId, createBacklinkMutation, persistence, toast]
+    [
+      sessionNoteId,
+      createBacklinkMutation,
+      persistence,
+      toast,
+      extractEvidenceSnippet,
+      refreshCleanupSuggestions,
+    ]
   );
+
+  // PRD-047 FR-3: undo link removes the backlink and reverts the row
+  const handleUndoLink = useCallback(
+    async (entity: DetectedEntity) => {
+      const linked = linkedBacklinks.get(entity.id);
+      if (!linked) return;
+
+      try {
+        await deleteBacklinkMutation.mutateAsync(linked.backlinkId);
+
+        persistence.unmarkCreated(entity.id);
+        setLinkedExistingEntities((prev) => {
+          const next = new Set(prev);
+          next.delete(entity.id);
+          return next;
+        });
+        setLinkedBacklinks((prev) => {
+          const next = new Map(prev);
+          next.delete(entity.id);
+          return next;
+        });
+
+        toast({
+          title: "Link removed",
+          description: "The backlink has been deleted.",
+        });
+      } catch {
+        toast({
+          title: "Failed to undo link",
+          variant: "destructive",
+        });
+      }
+    },
+    [linkedBacklinks, deleteBacklinkMutation, persistence, toast]
+  );
+
+  // PRD-049 FR-2: accepting a relationship suggestion persists it
+  const handleAcceptRelationship = useCallback(
+    async (suggestion: CleanupRelationshipSuggestion) => {
+      if (!sessionNoteId || !suggestion.fromNoteId || !suggestion.toNoteId) return;
+
+      setPendingRelationshipId(suggestion.id);
+      try {
+        await createRelationshipMutation.mutateAsync({
+          fromNoteId: suggestion.fromNoteId,
+          toNoteId: suggestion.toNoteId,
+          relationshipType: suggestion.relationshipType,
+          evidenceType: suggestion.evidenceType,
+          confidence: suggestion.confidence,
+          sourceNoteId: sessionNoteId,
+          snippetText: suggestion.snippetText,
+          sourceBlockId: suggestion.sourceBlockId,
+        });
+
+        setRelationshipStatus((prev) => new Map(prev).set(suggestion.id, "accepted"));
+        toast({
+          title: "Relationship saved",
+          description: `${suggestion.fromEntityText} → ${suggestion.toEntityText}`,
+        });
+      } catch {
+        toast({
+          title: "Failed to save relationship",
+          variant: "destructive",
+        });
+      } finally {
+        setPendingRelationshipId(null);
+      }
+    },
+    [sessionNoteId, createRelationshipMutation, toast]
+  );
+
+  const handleDismissRelationship = useCallback(
+    (suggestion: CleanupRelationshipSuggestion) => {
+      setRelationshipStatus((prev) => new Map(prev).set(suggestion.id, "dismissed"));
+    },
+    []
+  );
+
+  // PRD-049 FR-3: promote actionable text to a Quest note with auto-links
+  const handleCreateQuest = useCallback(
+    async (suggestion: CleanupQuestSuggestion) => {
+      setPendingQuestId(suggestion.id);
+      try {
+        const questNote = await createNoteMutation.mutateAsync({
+          title: suggestion.proposedQuestTitle,
+          content: buildFirstSeenSeed(sessionDate, suggestion.snippetText),
+          noteType: "quest",
+          importRunId: sourceImportRunId,
+        });
+
+        if (sessionNoteId) {
+          // Backlink from session → quest (Mention evidence)
+          await createBacklinkMutation.mutateAsync({
+            targetNoteId: questNote.id,
+            sourceNoteId: sessionNoteId,
+            textSnippet: suggestion.snippetText,
+            startOffset: suggestion.startOffset,
+            endOffset: suggestion.endOffset,
+            evidenceType: "Mention",
+            confidence: 0.8,
+          });
+
+          if (suggestion.suggestedNpcNoteId) {
+            await createRelationshipMutation.mutateAsync({
+              fromNoteId: questNote.id,
+              toNoteId: suggestion.suggestedNpcNoteId,
+              relationshipType: "QuestHasNPC",
+              evidenceType: "Heuristic",
+              confidence: 0.72,
+              sourceNoteId: sessionNoteId,
+              snippetText: suggestion.snippetText,
+            });
+          }
+
+          if (suggestion.suggestedAreaNoteId) {
+            await createRelationshipMutation.mutateAsync({
+              fromNoteId: questNote.id,
+              toNoteId: suggestion.suggestedAreaNoteId,
+              relationshipType: "QuestAtPlace",
+              evidenceType: "Heuristic",
+              confidence: 0.72,
+              sourceNoteId: sessionNoteId,
+              snippetText: suggestion.snippetText,
+            });
+          }
+        }
+
+        setQuestStatus((prev) => new Map(prev).set(suggestion.id, "promoted"));
+        toast({
+          title: "Quest created",
+          description: `${questNote.title} has been created and linked.`,
+        });
+
+        refreshCleanupSuggestions();
+      } catch {
+        toast({
+          title: "Failed to create quest",
+          variant: "destructive",
+        });
+      } finally {
+        setPendingQuestId(null);
+      }
+    },
+    [
+      sessionNoteId,
+      sessionDate,
+      sourceImportRunId,
+      createNoteMutation,
+      createBacklinkMutation,
+      createRelationshipMutation,
+      toast,
+      refreshCleanupSuggestions,
+    ]
+  );
+
+  const handleLinkExistingQuest = useCallback(
+    async (suggestion: CleanupQuestSuggestion, questNoteId: string) => {
+      if (!sessionNoteId) return;
+
+      setPendingQuestId(suggestion.id);
+      try {
+        await createBacklinkMutation.mutateAsync({
+          targetNoteId: questNoteId,
+          sourceNoteId: sessionNoteId,
+          textSnippet: suggestion.snippetText,
+          startOffset: suggestion.startOffset,
+          endOffset: suggestion.endOffset,
+          evidenceType: "Mention",
+          confidence: 0.8,
+        });
+
+        setQuestStatus((prev) => new Map(prev).set(suggestion.id, "promoted"));
+        toast({
+          title: "Quest linked",
+          description: "The session has been linked to the existing quest.",
+        });
+      } catch {
+        toast({
+          title: "Failed to link quest",
+          variant: "destructive",
+        });
+      } finally {
+        setPendingQuestId(null);
+      }
+    },
+    [sessionNoteId, createBacklinkMutation, toast]
+  );
+
+  const handleDismissQuest = useCallback((suggestion: CleanupQuestSuggestion) => {
+    setQuestStatus((prev) => new Map(prev).set(suggestion.id, "dismissed"));
+  }, []);
 
   // Handle dismiss
   const handleDismiss = useCallback(
@@ -562,7 +841,11 @@ export function EntitySuggestionsPanel({
 
         const newNote = await createNoteMutation.mutateAsync({
           title: entity.text,
-          content: "",
+          // PRD-048 FR-4: seed content so new entity pages are never blank
+          content: buildFirstSeenSeed(
+            sessionDate,
+            extractEvidenceSnippet(mention, entity.text)
+          ),
           noteType,
           linkedNoteIds: linkedNoteIds.length > 0 ? linkedNoteIds : undefined,
           importRunId: sourceImportRunId, // PRD-034: Track import origin for cascade delete
@@ -572,7 +855,7 @@ export function EntitySuggestionsPanel({
           await createBacklinkMutation.mutateAsync({
             targetNoteId: newNote.id,
             sourceNoteId: sessionNoteId,
-            textSnippet: mention?.text || entity.text,
+            textSnippet: extractEvidenceSnippet(mention, entity.text),
             sourceBlockId: mention?.blockId,
             startOffset: mention?.startOffset,
             endOffset: mention?.endOffset,
@@ -626,8 +909,10 @@ export function EntitySuggestionsPanel({
     createRelationshipMutation,
     allNotes,
     sessionNoteId,
+    sessionDate,
     sourceImportRunId, // PRD-034
     toast,
+    extractEvidenceSnippet,
   ]);
 
   // Navigate to session review
@@ -815,6 +1100,7 @@ export function EntitySuggestionsPanel({
                           linkedExistingEntities.has(entity.id) ||
                           persistence.isCreated(entity.id)
                         }
+                        linkedSnippet={linkedBacklinks.get(entity.id)?.snippet}
                         onSelect={() => handleSelectEntity(entity)}
                         onAccept={(noteType) => handleAccept(entity, noteType)}
                         onDismiss={() => handleDismiss(entity.id)}
@@ -824,12 +1110,40 @@ export function EntitySuggestionsPanel({
                         onLinkToExisting={(noteId) =>
                           handleLinkToExisting(entity, noteId)
                         }
+                        onUndoLink={
+                          linkedBacklinks.has(entity.id)
+                            ? () => handleUndoLink(entity)
+                            : undefined
+                        }
                         onOpenNote={onOpenNote}
                       />
                     );
                   })}
                 </div>
               </div>
+            )}
+
+            {/* PRD-049 FR-1: relationship suggestions with Accept/Dismiss */}
+            {cleanupData && (
+              <RelationshipSuggestionsSection
+                suggestions={cleanupData.relationshipSuggestions}
+                statusById={relationshipStatus}
+                pendingId={pendingRelationshipId}
+                onAccept={handleAcceptRelationship}
+                onDismiss={handleDismissRelationship}
+              />
+            )}
+
+            {/* PRD-049 FR-3: quest promotion from actionable text */}
+            {cleanupData && (
+              <QuestPromotionSection
+                suggestions={cleanupData.questSuggestions}
+                statusById={questStatus}
+                pendingId={pendingQuestId}
+                onCreateQuest={handleCreateQuest}
+                onLinkExistingQuest={handleLinkExistingQuest}
+                onDismiss={handleDismissQuest}
+              />
             )}
           </div>
         </CollapsibleContent>

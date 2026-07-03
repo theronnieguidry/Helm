@@ -12,6 +12,8 @@ export interface NuclinoLink {
   targetFilename: string;
   targetPageId: string;
   fullMatch: string;
+  /** The markdown line containing the link, truncated (PRD-050 evidence snippet). */
+  lineSnippet: string;
 }
 
 export interface NuclinoPage {
@@ -52,6 +54,12 @@ export interface NuclinoLinkStats {
   totalLinks: number;
   pagesWithLinks: number;
   uniqueTargetPages: number;
+  /** PRD-050: links whose target page exists in the export. */
+  resolvedLinks: number;
+  /** PRD-050: links whose target page is not in the export. */
+  unresolvedLinks: number;
+  /** PRD-050: most frequent unresolved link targets (up to 10). */
+  topUnresolvedTargets: Array<{ target: string; count: number }>;
 }
 
 // Known collection page names for auto-detection
@@ -212,6 +220,21 @@ function parseTargetPageId(target: string): string | null {
  * Nuclino links look like: [Link Text](<Some Page abc12345.md?n>)
  * The ?n suffix and angle brackets are Nuclino-specific.
  */
+const LINE_SNIPPET_MAX_LENGTH = 240;
+
+/**
+ * Extract the full markdown line containing a match, truncated for storage.
+ */
+function extractLineSnippet(content: string, matchIndex: number): string {
+  const lineStart = content.lastIndexOf("\n", matchIndex) + 1;
+  const lineEndIndex = content.indexOf("\n", matchIndex);
+  const lineEnd = lineEndIndex === -1 ? content.length : lineEndIndex;
+  const line = content.slice(lineStart, lineEnd).trim();
+  return line.length > LINE_SNIPPET_MAX_LENGTH
+    ? `${line.slice(0, LINE_SNIPPET_MAX_LENGTH - 3)}...`
+    : line;
+}
+
 export function extractNuclinoLinks(content: string): NuclinoLink[] {
   const links: NuclinoLink[] = [];
 
@@ -238,6 +261,7 @@ export function extractNuclinoLinks(content: string): NuclinoLink[] {
       targetFilename: filenameWithoutQuery,
       targetPageId,
       fullMatch,
+      lineSnippet: extractLineSnippet(content, match.index),
     });
   }
 
@@ -467,8 +491,12 @@ export function resolveNuclinoLinks(
 
 export function summarizeNuclinoLinks(pages: NuclinoPage[]): NuclinoLinkStats {
   const targetPages = new Set<string>();
+  const knownPageIds = new Set(pages.map((page) => page.sourcePageId));
+  const unresolvedCounts = new Map<string, number>();
   let totalLinks = 0;
   let pagesWithLinks = 0;
+  let resolvedLinks = 0;
+  let unresolvedLinks = 0;
 
   for (const page of pages) {
     if (page.links.length > 0) {
@@ -477,13 +505,28 @@ export function summarizeNuclinoLinks(pages: NuclinoPage[]): NuclinoLinkStats {
     totalLinks += page.links.length;
     for (const link of page.links) {
       targetPages.add(link.targetPageId);
+      if (knownPageIds.has(link.targetPageId)) {
+        resolvedLinks++;
+      } else {
+        unresolvedLinks++;
+        const key = link.targetFilename || link.text;
+        unresolvedCounts.set(key, (unresolvedCounts.get(key) ?? 0) + 1);
+      }
     }
   }
+
+  const topUnresolvedTargets = Array.from(unresolvedCounts.entries())
+    .map(([target, count]) => ({ target, count }))
+    .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target))
+    .slice(0, 10);
 
   return {
     totalLinks,
     pagesWithLinks,
     uniqueTargetPages: targetPages.size,
+    resolvedLinks,
+    unresolvedLinks,
+    topUnresolvedTargets,
   };
 }
 

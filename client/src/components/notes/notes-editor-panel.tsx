@@ -42,6 +42,7 @@ import type { Note, NoteType, Team, QuestStatus } from "@shared/schema";
 import { QUEST_STATUSES, QUEST_STATUS_LABELS } from "@shared/schema";
 import { format } from "date-fns";
 import { EntitySuggestionsPanel } from "./entity-suggestions-panel";
+import { NoteDetailSections } from "./note-detail-sections";
 
 const NOTE_TYPE_LABELS: Record<NoteType, string> = {
   area: "Area",
@@ -80,6 +81,7 @@ interface NotesEditorPanelProps {
   todaySession: Note | null;
   isTodayMode: boolean;
   memberAiEnabled: boolean; // PRD-028
+  memberRole?: string; // PRD-048: role-gates relationship deletion
   onNoteCreated: (note: Note) => void;
   onNoteDeleted: (noteId: string) => void;
   onOpenNote?: (noteId: string) => void;
@@ -92,6 +94,7 @@ export function NotesEditorPanel({
   todaySession,
   isTodayMode,
   memberAiEnabled,
+  memberRole,
   onNoteCreated,
   onNoteDeleted,
   onOpenNote,
@@ -359,9 +362,9 @@ export function NotesEditorPanel({
               value={draftContent}
               onChange={(e) => handleContentChange(e.target.value)}
               placeholder={
-                isTodayMode
+                isTodayMode || activeNote?.noteType === "session_log"
                   ? "Start typing your session notes..."
-                  : "Write your notes here..."
+                  : "Add details about this entity... (appearance, role, motivations, etc.)"
               }
               className="min-h-[400px] resize-none"
             />
@@ -378,6 +381,19 @@ export function NotesEditorPanel({
                 onOpenNote={onOpenNote}
               />
             )}
+
+            {/* PRD-048: entity pages show session references + relationships */}
+            {!isTodayMode &&
+              activeNote &&
+              activeNote.noteType !== "session_log" && (
+                <NoteDetailSections
+                  team={team}
+                  note={activeNote}
+                  userId={userId}
+                  isDm={memberRole === "dm"}
+                  onOpenNote={onOpenNote}
+                />
+              )}
           </div>
         )}
 

@@ -23,6 +23,7 @@ interface UseSuggestionPersistenceResult {
   dismissEntity: (entityId: string) => void;
   reclassifyEntity: (entityId: string, newType: NoteType) => void;
   markCreated: (entityId: string) => void;
+  unmarkCreated: (entityId: string) => void;
   isDismissed: (entityId: string) => boolean;
   getReclassifiedType: (entityId: string) => NoteType | undefined;
   isCreated: (entityId: string) => boolean;
@@ -155,6 +156,15 @@ export function useSuggestionPersistence({
     setCreated(prev => new Set([...prev, entityId]));
   }, []);
 
+  // PRD-047 FR-3: undoing a link reverts the entity to actionable state
+  const unmarkCreated = useCallback((entityId: string) => {
+    setCreated(prev => {
+      const next = new Set(prev);
+      next.delete(entityId);
+      return next;
+    });
+  }, []);
+
   const isDismissed = useCallback((entityId: string) => {
     return dismissed.has(entityId);
   }, [dismissed]);
@@ -185,6 +195,7 @@ export function useSuggestionPersistence({
     dismissEntity,
     reclassifyEntity,
     markCreated,
+    unmarkCreated,
     isDismissed,
     getReclassifiedType,
     isCreated,

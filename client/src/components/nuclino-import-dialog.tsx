@@ -78,6 +78,10 @@ interface ParseResponse {
     totalLinks: number;
     pagesWithLinks: number;
     uniqueTargetPages: number;
+    // PRD-050 FR-5: link resolution stats
+    resolvedLinks?: number;
+    unresolvedLinks?: number;
+    topUnresolvedTargets?: Array<{ target: string; count: number }>;
   };
   pages: ParsedPage[];
   detectedPCNames?: string[]; // PRD-040: PC names from team member settings
@@ -633,9 +637,32 @@ export function NuclinoImportDialog({
               <>
                 <span>·</span>
                 <span>{linkStats.totalLinks} links ({linkStats.uniqueTargetPages} unique targets)</span>
+                {typeof linkStats.resolvedLinks === "number" && (
+                  <>
+                    <span>·</span>
+                    <span data-testid="link-resolution-stats">
+                      {linkStats.resolvedLinks} resolved / {linkStats.unresolvedLinks ?? 0} unresolved
+                    </span>
+                  </>
+                )}
               </>
             )}
           </div>
+
+          {/* PRD-050 FR-5: surface unresolved link targets so users can decide whether to proceed */}
+          {linkStats?.topUnresolvedTargets && linkStats.topUnresolvedTargets.length > 0 && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+              <p className="font-medium mb-1">Unresolved link targets</p>
+              <ul className="text-xs text-muted-foreground space-y-0.5">
+                {linkStats.topUnresolvedTargets.map(({ target, count }) => (
+                  <li key={target} className="truncate">
+                    {target}
+                    {count > 1 ? ` (×${count})` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* PRD-042: Expandable empty pages section */}
           {emptyPages.length > 0 && (

@@ -47,6 +47,9 @@ import {
   ENABLE_NUCLINO_LINK_EVIDENCE,
 } from "./feature-flags";
 
+// PRD-050 FR-3: explicit Nuclino links are high-confidence evidence.
+const NUCLINO_LINK_EVIDENCE_CONFIDENCE = 0.9;
+
 // PRD-015: Multer config for ZIP file uploads (store in memory)
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -819,20 +822,42 @@ export async function registerRoutes(
         }
       }
 
-      const normalizedReferencesIn = referencesIn.map((reference) => {
-        const sourceNote = relatedNoteMap.get(reference.sourceNoteId);
-        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
-        return {
-          ...reference,
-          sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
-          sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
-          sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
-          textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
-          snippetPreview: sourceVisible
-            ? toSnippetPreview(reference.textSnippet, "")
-            : "Referenced in a private note",
-        };
-      });
+      // PRD-048 FR-1b: include author names for reference entries
+      const teamMembersWithUsers = await storage.getTeamMembers(teamId);
+      const memberNameByUserId = new Map<string, string>();
+      for (const teamMember of teamMembersWithUsers) {
+        const name = [teamMember.user?.firstName, teamMember.user?.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        memberNameByUserId.set(teamMember.userId, name || teamMember.user?.email || "Unknown");
+      }
+
+      const normalizedReferencesIn = referencesIn
+        .map((reference) => {
+          const sourceNote = relatedNoteMap.get(reference.sourceNoteId);
+          const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
+          return {
+            ...reference,
+            sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
+            sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
+            sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
+            sourceNoteSessionDate: sourceVisible ? sourceNote?.sessionDate ?? null : null,
+            createdByName: reference.createdByUserId
+              ? memberNameByUserId.get(reference.createdByUserId) ?? null
+              : null,
+            textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
+            snippetPreview: sourceVisible
+              ? toSnippetPreview(reference.textSnippet, "")
+              : "Referenced in a private note",
+          };
+        })
+        // PRD-048 FR-2: order by most recent session date, then creation time
+        .sort((a, b) => {
+          const aDate = a.sourceNoteSessionDate ?? a.createdAt;
+          const bDate = b.sourceNoteSessionDate ?? b.createdAt;
+          return new Date(bDate ?? 0).getTime() - new Date(aDate ?? 0).getTime();
+        });
 
       const normalizedReferencesOut = referencesOut.map((reference) => {
         const targetNote = relatedNoteMap.get(reference.targetNoteId);
@@ -1752,16 +1777,23 @@ export async function registerRoutes(
                 null,
               );
 
+              // PRD-050 FR-3: snippet is the markdown line containing the link.
+              const evidenceSnippet = (link.lineSnippet || link.text).slice(0, 500);
+
               if (ENABLE_NUCLINO_LINK_EVIDENCE) {
                 const fromType = noteTypeByNoteId.get(noteId) || "note";
                 const toType = noteTypeByNoteId.get(targetNoteId) || "note";
                 const inferred = inferRelationshipTypeForNoteTypes(fromType, toType);
+                // Honor the canonical direction (e.g. NPC page linking a Quest
+                // stores QuestHasNPC from the quest to the NPC).
+                const relationshipFromNoteId = inferred.swap ? targetNoteId : noteId;
+                const relationshipToNoteId = inferred.swap ? noteId : targetNoteId;
 
                 const existingRelationships = await storage.getRelationshipsForNote(noteId);
                 const existingRelationship = existingRelationships.find(
                   (relationship) =>
-                    relationship.fromNoteId === noteId &&
-                    relationship.toNoteId === targetNoteId &&
+                    relationship.fromNoteId === relationshipFromNoteId &&
+                    relationship.toNoteId === relationshipToNoteId &&
                     relationship.relationshipType === inferred.relationshipType &&
                     relationship.sourceNoteId === noteId &&
                     (relationship.sourceBlockId || "") === sourceBlockId,
@@ -1770,14 +1802,14 @@ export async function registerRoutes(
                 if (!existingRelationship) {
                   await storage.createNoteRelationship({
                     enrichmentRunId: null,
-                    fromNoteId: noteId,
-                    toNoteId: targetNoteId,
+                    fromNoteId: relationshipFromNoteId,
+                    toNoteId: relationshipToNoteId,
                     createdByUserId: userId,
                     sourceNoteId: noteId,
                     sourceBlockId,
                     relationshipType: inferred.relationshipType,
-                    confidence: 0.92,
-                    evidenceSnippet: link.text.slice(0, 500),
+                    confidence: NUCLINO_LINK_EVIDENCE_CONFIDENCE,
+                    evidenceSnippet,
                     evidenceType: "Link",
                     status: "approved",
                     approvedByUserId: userId,
@@ -1794,9 +1826,9 @@ export async function registerRoutes(
                 if (existingBacklink) {
                   await storage.updateBacklink(existingBacklink.id, {
                     sourceBlockId,
-                    textSnippet: link.text.slice(0, 500),
+                    textSnippet: evidenceSnippet,
                     evidenceType: "Link",
-                    confidence: 0.92,
+                    confidence: NUCLINO_LINK_EVIDENCE_CONFIDENCE,
                   });
                 } else {
                   await storage.createBacklink({
@@ -1804,9 +1836,9 @@ export async function registerRoutes(
                     sourceBlockId,
                     targetNoteId,
                     createdByUserId: userId,
-                    textSnippet: link.text.slice(0, 500),
+                    textSnippet: evidenceSnippet,
                     evidenceType: "Link",
-                    confidence: 0.92,
+                    confidence: NUCLINO_LINK_EVIDENCE_CONFIDENCE,
                   });
                 }
               }
