@@ -46,6 +46,7 @@ import {
   ENABLE_ENTITY_DETAIL_ENDPOINT,
   ENABLE_NUCLINO_LINK_EVIDENCE,
 } from "./feature-flags";
+import { canViewNote, filterVisibleNotes } from "./note-visibility";
 
 // PRD-050 FR-3: explicit Nuclino links are high-confidence evidence.
 const NUCLINO_LINK_EVIDENCE_CONFIDENCE = 0.9;
@@ -159,10 +160,6 @@ export function updateImportProgress(
 
 const RELATIONSHIP_TYPE_SET = new Set<RelationshipType>(RELATIONSHIP_TYPES);
 const EVIDENCE_TYPE_SET = new Set<EvidenceType>(EVIDENCE_TYPES);
-
-function canViewNote(note: { isPrivate: boolean | null; authorId: string }, userId: string, role: "dm" | "member"): boolean {
-  return !note.isPrivate || note.authorId === userId || role === "dm";
-}
 
 function getSessionContent(note: {
   content?: string | null;
@@ -724,7 +721,8 @@ export async function registerRoutes(
       }
 
       const notes = await storage.getNotes(teamId);
-      res.json(notes);
+      // P0-1 (F0/F48): never ship other authors' private notes to members
+      res.json(filterVisibleNotes(notes, userId, member.role));
     } catch (error) {
       console.error("Error fetching notes:", error);
       res.status(500).json({ message: "Failed to fetch notes" });
@@ -762,7 +760,13 @@ export async function registerRoutes(
       }
 
       const items = await storage.getPendingLowConfidenceClassifications(teamId);
-      res.json({ items, count: items.length });
+      // P0-1 (F81): don't expose private notes' titles/explanations to non-authors
+      const teamNotes = await storage.getNotes(teamId);
+      const visibleNoteIds = new Set(
+        filterVisibleNotes(teamNotes, userId, member.role).map((note) => note.id),
+      );
+      const visibleItems = items.filter((item) => visibleNoteIds.has(item.noteId));
+      res.json({ items: visibleItems, count: visibleItems.length });
     } catch (error) {
       console.error("Error fetching needs-review items:", error);
       res.status(500).json({ message: "Failed to fetch needs-review items" });
@@ -1011,6 +1015,10 @@ export async function registerRoutes(
       if (noteType === "session_log" && sessionDate) {
         const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
         if (existing) {
+          // P0-1 (F9): don't leak another author's private session content
+          if (!canViewNote(existing, userId, member.role)) {
+            return res.status(409).json({ message: "A private session already exists for this date" });
+          }
           // Return existing session instead of creating duplicate
           return res.status(200).json(existing);
         }
@@ -2546,39 +2554,34 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Not a team member" });
       }
 
-      // Get classification to verify team ownership
-      const classifications = await Promise.all(
-        (await storage.getNoteClassificationsByEnrichmentRun("")).map(async (c) => {
-          const enrichmentRun = await storage.getEnrichmentRun(c.enrichmentRunId);
-          return { ...c, teamId: enrichmentRun?.teamId };
-        })
+      // Get classification to verify team ownership (via this team's enrichment runs)
+      const allEnrichmentRuns = await Promise.all(
+        (await storage.getImportRuns(teamId)).map((ir) =>
+          storage.getEnrichmentRunByImportId(ir.id)
+        )
       );
 
-      const classification = classifications.find(
-        (c) => c.id === classificationId && c.teamId === teamId
-      );
+      type StoredClassification = Awaited<ReturnType<typeof storage.getNoteClassificationsByEnrichmentRun>>[number];
+      let classification: StoredClassification | undefined;
+      for (const er of allEnrichmentRuns) {
+        if (!er) continue;
+        const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
+        const match = erClassifications.find((c) => c.id === classificationId);
+        if (match) {
+          classification = match;
+          break;
+        }
+      }
 
       if (!classification) {
-        // Try to get it directly by looking up the note
-        const allEnrichmentRuns = await Promise.all(
-          (await storage.getImportRuns(teamId)).map((ir) =>
-            storage.getEnrichmentRunByImportId(ir.id)
-          )
-        );
+        return res.status(404).json({ message: "Classification not found" });
+      }
 
-        let found = false;
-        for (const er of allEnrichmentRuns) {
-          if (!er) continue;
-          const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
-          if (erClassifications.some((c) => c.id === classificationId)) {
-            found = true;
-            break;
-          }
-        }
-
-        if (!found) {
-          return res.status(404).json({ message: "Classification not found" });
-        }
+      // P0-1 (F81): members must not approve/reject/reclassify classifications
+      // belonging to another author's private note. 404 to avoid confirming existence.
+      const classifiedNote = await storage.getNote(classification.noteId);
+      if (!classifiedNote || classifiedNote.teamId !== teamId || !canViewNote(classifiedNote, userId, member.role)) {
+        return res.status(404).json({ message: "Classification not found" });
       }
 
       const updated = await storage.updateNoteClassificationStatus(classificationId, status, userId);

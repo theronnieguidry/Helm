@@ -172,6 +172,44 @@ describe("NoteDetailSections relationships (PRD-048 FR-3)", () => {
     });
   });
 
+  // Gap F64/F89 (PRD-016): pending AI edges are badged, rejected ones hidden
+  it("badges pending AI-enrichment edges and hides rejected ones", async () => {
+    detailFixture.relationships = [
+      {
+        id: "rel-pending",
+        fromNoteId: "quest-1",
+        toNoteId: "npc-1",
+        relationshipType: "QuestHasNPC",
+        evidenceType: "Heuristic",
+        evidenceSnippet: null,
+        confidence: 0.7,
+        createdByUserId: "user-2",
+        status: "pending",
+        fromNote: { id: "quest-1", title: "Pending Quest", noteType: "quest" },
+        toNote: { id: "npc-1", title: "Kettle", noteType: "npc" },
+      },
+      {
+        id: "rel-rejected",
+        fromNoteId: "quest-2",
+        toNoteId: "npc-1",
+        relationshipType: "QuestHasNPC",
+        evidenceType: "Heuristic",
+        evidenceSnippet: null,
+        confidence: 0.7,
+        createdByUserId: "user-2",
+        status: "rejected",
+        fromNote: { id: "quest-2", title: "Rejected Quest", noteType: "quest" },
+        toNote: { id: "npc-1", title: "Kettle", noteType: "npc" },
+      },
+    ] as NoteDetailResponse["relationships"];
+
+    renderSections();
+
+    expect(await screen.findByText("Pending Quest")).toBeInTheDocument();
+    expect(screen.getByText("Pending AI review")).toBeInTheDocument();
+    expect(screen.queryByText("Rejected Quest")).not.toBeInTheDocument();
+  });
+
   it("lets the DM delete the relationship", async () => {
     mockApiRequest.mockResolvedValue({});
     renderSections({ userId: "user-1", isDm: true });

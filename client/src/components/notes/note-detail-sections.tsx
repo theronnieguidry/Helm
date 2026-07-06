@@ -38,6 +38,8 @@ interface NoteDetailRelationship {
   evidenceSnippet: string | null;
   confidence: number | null;
   createdByUserId: string | null;
+  /** Gap F64/F89 (PRD-016): AI-enrichment edges carry a review status */
+  status?: string | null;
   fromNote: NoteDetailRelationshipEnd;
   toNote: NoteDetailRelationshipEnd;
 }
@@ -116,16 +118,25 @@ export function NoteDetailSections({
     },
   });
 
-  // PRD-048 FR-1c: group relationships by type
+  // PRD-048 FR-1c: group relationships by type.
+  // Gap F64/F89: rejected AI edges are hidden; pending ones are badged below
+  // so unreviewed suggestions are never indistinguishable from confirmed facts.
+  const visibleRelationships = useMemo(
+    () =>
+      (detail?.relationships ?? []).filter(
+        (relationship) => relationship.status !== "rejected"
+      ),
+    [detail?.relationships]
+  );
   const groupedRelationships = useMemo(() => {
     const groups = new Map<string, NoteDetailRelationship[]>();
-    for (const relationship of detail?.relationships ?? []) {
+    for (const relationship of visibleRelationships) {
       const group = groups.get(relationship.relationshipType) ?? [];
       group.push(relationship);
       groups.set(relationship.relationshipType, group);
     }
     return groups;
-  }, [detail?.relationships]);
+  }, [visibleRelationships]);
 
   if (isLoading) {
     return (
@@ -137,7 +148,7 @@ export function NoteDetailSections({
   }
 
   const referencesIn = detail?.referencesIn ?? [];
-  const relationships = detail?.relationships ?? [];
+  const relationships = visibleRelationships;
 
   return (
     <div className="space-y-4 border-t mt-4 pt-4">
@@ -262,6 +273,14 @@ export function NoteDetailSections({
                               className={`text-xs py-0 px-1.5 ${BUCKET_STYLES[bucket]}`}
                             >
                               {BUCKET_LABELS[bucket]}
+                            </Badge>
+                          )}
+                          {relationship.status === "pending" && (
+                            <Badge
+                              variant="outline"
+                              className="text-xs py-0 px-1.5 bg-amber-500/10 text-amber-600 border-amber-500/20"
+                            >
+                              Pending AI review
                             </Badge>
                           )}
                         </div>

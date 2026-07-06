@@ -168,6 +168,23 @@ describe("buildCleanupSuggestions (PRD-049)", () => {
     expect(quest.suggestedAreaNoteId).toBe("area-1");
   });
 
+  it("detects quest promotion from natural-prose action phrases (gap F13)", () => {
+    const result = buildCleanupSuggestions({
+      content: "The innkeeper asked us to find the missing caravan. Also, we need to defeat the bandits soon.",
+      existingNotes: [],
+      includeLow: true,
+      mode: "baseline",
+    });
+
+    const titles = result.questSuggestions.map((s) => s.proposedQuestTitle.toLowerCase());
+    expect(titles.some((t) => t.includes("find") && t.includes("missing caravan"))).toBe(true);
+    expect(titles.some((t) => t.includes("defeat") && t.includes("bandits"))).toBe(true);
+    // Presentable title casing
+    for (const s of result.questSuggestions) {
+      expect(s.proposedQuestTitle.charAt(0)).toBe(s.proposedQuestTitle.charAt(0).toUpperCase());
+    }
+  });
+
   it("matches existing quests by title overlap", () => {
     const result = buildCleanupSuggestions({
       content: SESSION_CONTENT,

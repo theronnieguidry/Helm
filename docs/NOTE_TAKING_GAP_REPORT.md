@@ -19,6 +19,13 @@ critical/major claims were confirmed real; zero were refuted.** Minor/polish fin
 **Scoreboard**: 93 findings — 3 critical, 22 major, 53 minor, 15 polish.
 Branch: `claude/note-taking-completion-49gfvg` (PR #6, commit `de406b5`). Date: 2026-07-05.
 
+> **UPDATE (2026-07-06): all P0 and P1 items below are IMPLEMENTED** with tests on PR #6
+> (679 tests passing). That resolves all 3 criticals and the majors bundled into P0/P1:
+> F0, F2, F3, F9, F13, F17, F18, F42, F43, F47 (deep link + markdown rendering), F48,
+> F55, F56, F69, F70, F81, F85, plus bundled minors F27, F86, F87 and part of the F44/F78
+> test debt. Remaining open: the P2/P3 sections and the unbundled majors (F1, F19, F20,
+> F21, F31, F32, F33, F34, F49, F57, F58, F59) — see §3 P2 and §5 for detail.
+
 ---
 
 ## 1. Executive summary

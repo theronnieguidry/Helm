@@ -284,19 +284,22 @@ export class AICache {
     // Increment hit count
     this.storage.incrementAICacheHitCount(entry.id).catch(() => {});
 
-    // Map cached result to match current note IDs
-    const result = entry.result as RelationshipResult;
+    // Map cached result to match current note IDs.
+    // Relationships are order-dependent, but our cache key is order-independent.
+    // The entry stores _cachedFromKeyHash: the full normalized content hash of
+    // the note that was the "from" side when the result was cached. Comparing
+    // the caller's fromNote hash against it tells us whether to keep or swap
+    // the direction. (No legacy fallback is needed: entries written before
+    // _cachedFromKeyHash existed carry algorithm version 1.0.0 and can never
+    // be returned under the current version.)
+    const { _cachedFromKeyHash, ...result } = entry.result as RelationshipResult & {
+      _cachedFromKeyHash?: string;
+    };
 
-    // Relationships are order-dependent, but our cache key is order-independent
-    // We need to return the relationship with correct from/to based on input order
-    const cachedHash1 = sha256(normalizeForHash(fromNote.title, fromNote.content));
-    const cachedFromHash = sha256(normalizeForHash(
-      (result as any)._cachedFromTitle || "",
-      (result as any)._cachedFromContent || ""
-    ));
+    const callerFromHash = sha256(normalizeForHash(fromNote.title, fromNote.content));
 
-    // If the from note matches, return as-is; otherwise swap
-    if (cachedHash1 === cachedFromHash) {
+    // If the from note matches the cached direction, return as-is; otherwise swap
+    if (callerFromHash === _cachedFromKeyHash) {
       return {
         ...result,
         fromNoteId: fromNote.id,
@@ -325,11 +328,14 @@ export class AICache {
 
     const expiresAt = new Date(Date.now() + DEFAULT_CACHE_TTL_MS);
 
-    // Store with metadata to preserve direction
+    // Store with metadata to preserve direction. The key hash is the FULL
+    // normalized content hash (same function getRelationship uses for the
+    // caller's fromNote), so direction detection is exact. Storing a content
+    // prefix and re-hashing it on read (the old approach) broke for any note
+    // whose normalized content exceeded the prefix length.
     const resultWithMeta = {
       ...result,
-      _cachedFromTitle: fromNote.title,
-      _cachedFromContent: fromNote.content.slice(0, 100), // Just enough to identify
+      _cachedFromKeyHash: sha256(normalizeForHash(fromNote.title, fromNote.content)),
     };
 
     const entry: InsertAICacheEntry = {

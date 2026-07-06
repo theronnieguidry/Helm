@@ -43,6 +43,8 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useEntityDetection } from "@/hooks/use-entity-detection";
+import { useSuggestionPersistence } from "@/hooks/use-suggestion-persistence";
+import { format } from "date-fns";
 import { SelectableContent } from "@/components/selectable-content";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Note, NoteType, Team } from "@shared/schema";
@@ -97,10 +99,9 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     content: "",
     noteType: "npc" as NoteType,
   });
-  const [linkedEntities, setLinkedEntities] = useState<Set<string>>(new Set());
-  const [dismissedEntities, setDismissedEntities] = useState<Set<string>>(
-    new Set()
-  );
+  // Gap F18 (PRD-003): review progress must survive refresh. Persist
+  // dismissed/linked state in localStorage keyed by the session's own date,
+  // via the same hook the live editor panel uses.
   const [selectedAssociations, setSelectedAssociations] = useState<Set<string>>(
     new Set()
   );
@@ -116,6 +117,16 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     queryKey: ["/api/teams", team.id, "notes"],
     enabled: !!team.id,
   });
+
+  const persistence = useSuggestionPersistence({
+    teamId: team.id,
+    sessionDate: sessionLog?.sessionDate
+      ? format(new Date(sessionLog.sessionDate), "yyyy-MM-dd")
+      : undefined,
+    enabled: !!sessionLog,
+  });
+  const linkedEntities = persistence.created;
+  const dismissedEntities = persistence.dismissed;
 
   // Create note mutation
   const createNoteMutation = useMutation({
@@ -217,7 +228,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     },
     onSuccess: () => {
       if (selectedEntity) {
-        setLinkedEntities((prev) => new Set(prev).add(selectedEntity.id));
+        persistence.markCreated(selectedEntity.id);
       }
     },
   });
@@ -411,7 +422,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
   };
 
   const handleDismissEntity = (entityId: string) => {
-    setDismissedEntities((prev) => new Set(prev).add(entityId));
+    persistence.dismissEntity(entityId);
   };
 
   if (isLoadingSession || isLoadingNotes) {

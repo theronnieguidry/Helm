@@ -580,4 +580,65 @@ describe("Entity Detection (PRD-002)", () => {
       expect(captainEntities[0].normalizedText).toBe("captain garner");
     });
   });
+
+  describe("P0-2: Stable entity IDs (PRD-022 FR-7/FR-9)", () => {
+    it("assigns identical IDs across repeated detection runs on the same content", () => {
+      const text = "Lord Blackwood met us near The Silverwood Forest.";
+      const first = detectEntities(text);
+      const second = detectEntities(text);
+
+      expect(first.length).toBeGreaterThan(0);
+      expect(first.map((e) => e.id)).toEqual(second.map((e) => e.id));
+    });
+
+    it("keeps an entity's ID stable when unrelated content is appended", () => {
+      const base = "Lord Blackwood greeted the party.";
+      const extended = base + " Later we rested at camp and talked for hours.";
+
+      const findBlackwood = (entities: ReturnType<typeof detectEntities>) =>
+        entities.find((e) => e.normalizedText === "lord blackwood");
+
+      const before = findBlackwood(detectEntities(base));
+      const after = findBlackwood(detectEntities(extended));
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      expect(after!.id).toBe(before!.id);
+    });
+
+    it("derives IDs from type and normalized text", () => {
+      const entities = detectEntities("Lord Blackwood arrived.");
+      const blackwood = entities.find((e) => e.normalizedText === "lord blackwood");
+      expect(blackwood!.id).toBe("entity-npc-lord-blackwood");
+    });
+  });
+
+  describe("P0-5: Natural-prose quest detection (PRD-002 FR-2)", () => {
+    it("detects 'asked us to find the artifact'", () => {
+      const entities = detectEntities("The old sage asked us to find the artifact before dawn.");
+      const quest = entities.find((e) => e.type === "quest");
+      expect(quest).toBeDefined();
+      expect(quest!.normalizedText).toContain("find");
+      expect(quest!.normalizedText).toContain("artifact");
+    });
+
+    it("detects 'We need to defeat the dragon'", () => {
+      const entities = detectEntities("We need to defeat the dragon terrorizing the valley");
+      const quest = entities.find((e) => e.type === "quest");
+      expect(quest).toBeDefined();
+      expect(quest!.normalizedText).toContain("defeat");
+      expect(quest!.normalizedText).toContain("dragon");
+    });
+
+    it("detects 'must retrieve' phrasing", () => {
+      const entities = detectEntities("The party must retrieve the stolen ledger from the docks");
+      const quest = entities.find((e) => e.type === "quest");
+      expect(quest).toBeDefined();
+      expect(quest!.normalizedText).toContain("retrieve");
+    });
+
+    it("still detects the capitalized quest forms", () => {
+      const entities = detectEntities("Our Quest for the Lost Crown continues.");
+      expect(entities.some((e) => e.type === "quest")).toBe(true);
+    });
+  });
 });

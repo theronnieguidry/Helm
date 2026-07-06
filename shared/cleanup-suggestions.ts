@@ -80,6 +80,9 @@ export function buildFirstSeenSeed(sessionLabel: string, snippet: string): strin
 const QUEST_ACTION_PATTERNS = [
   /\b(Find|Defeat|Retrieve|Rescue|Discover|Destroy|Recover|Investigate|Escort)\s+the\s+([A-Za-z][^.!?\n]{2,90})/g,
   /\b(Find|Defeat|Retrieve|Rescue|Discover|Destroy|Recover|Investigate|Escort)\s+([A-Z][A-Za-z0-9' -]{2,90})/g,
+  // PRD-002 FR-2 / gap F13: natural-prose action phrases in normal session prose,
+  // e.g. "she asked us to find the artifact", "we need to defeat the dragon".
+  /\b(?:need(?:s)? to|asked (?:us|me|them) to|must|have to|has to|were told to)\s+(find|defeat|retrieve|rescue|discover|destroy|recover|investigate|escort)\s+(?:the\s+)?([a-z][^.!?\n]{2,90})/gi,
 ];
 
 function toSlug(value: string): string {
@@ -327,7 +330,9 @@ function buildQuestSuggestions(
     while ((match = pattern.exec(content)) !== null) {
       const verb = match[1].trim();
       const subject = match[2].trim().replace(/[.,;:!?]+$/, "");
-      const title = `${verb} ${subject}`.replace(/\s+/g, " ").trim();
+      const rawTitle = `${verb} ${subject}`.replace(/\s+/g, " ").trim();
+      // Prose-derived matches are lowercase; capitalize for a presentable quest title.
+      const title = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
       const titleKey = title.toLowerCase();
       if (!title || seenTitles.has(titleKey)) continue;
       seenTitles.add(titleKey);

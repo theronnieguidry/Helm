@@ -8,12 +8,14 @@ import {
   type TeamType,
   type AvailabilityStatus,
   type SessionStatus,
+  type NoteType,
   type RelationshipType,
   type EvidenceType,
 } from "@shared/schema";
 import { generateSessionCandidates } from "@shared/recurrence";
 import { buildCleanupSuggestions, type CleanupSuggestionMode } from "@shared/cleanup-suggestions";
 import { canonicalizeSourceBlockId } from "@shared/text-hash";
+import { canViewNote, filterVisibleNotes } from "../note-visibility";
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -34,10 +36,6 @@ function rollDice(sides: number, count: number): number[] {
 
 const RELATIONSHIP_TYPE_SET = new Set<RelationshipType>(RELATIONSHIP_TYPES);
 const EVIDENCE_TYPE_SET = new Set<EvidenceType>(EVIDENCE_TYPES);
-
-function canViewNote(note: { isPrivate: boolean | null; authorId: string }, userId: string, role: "dm" | "member"): boolean {
-  return !note.isPrivate || note.authorId === userId || role === "dm";
-}
 
 function getSessionContent(note: { content?: string | null; contentBlocks?: Array<{ content: string }> | null }): string {
   if (note.content && note.content.trim().length > 0) {
@@ -287,8 +285,8 @@ export async function registerTestRoutes(
       }
 
       const notes = await storage.getNotes(teamId);
-      const filtered = notes.filter(n => !n.isPrivate || n.authorId === userId);
-      res.json(filtered);
+      // P0-1 (F0/F48): shared predicate with production route (DM sees all)
+      res.json(filterVisibleNotes(notes, userId, member.role));
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch notes" });
     }
@@ -324,9 +322,91 @@ export async function registerTestRoutes(
       }
 
       const items = await storage.getPendingLowConfidenceClassifications(teamId);
-      res.json({ items, count: items.length });
+      // P0-1 (F81): don't expose private notes' titles/explanations to non-authors
+      const teamNotes = await storage.getNotes(teamId);
+      const visibleNoteIds = new Set(
+        filterVisibleNotes(teamNotes, userId, member.role).map((note) => note.id),
+      );
+      const visibleItems = items.filter((item) => visibleNoteIds.has(item.noteId));
+      res.json({ items: visibleItems, count: visibleItems.length });
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch needs-review items" });
+    }
+  });
+
+  // PRD-037/PRD-038: Approve/reject/reclassify a low-confidence classification
+  // (mirrors production route in server/routes.ts, including the P0-1/F81 privacy guard)
+  app.patch("/api/teams/:teamId/classifications/:classificationId", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId, classificationId } = req.params;
+      const { status, overrideType } = req.body;
+
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const validTypes = ["Character", "NPC", "Area", "POI", "Quest", "SessionLog", "Note"];
+      if (overrideType && !validTypes.includes(overrideType)) {
+        return res.status(400).json({ message: "Invalid override type" });
+      }
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      // Get classification to verify team ownership (via this team's enrichment runs)
+      const allEnrichmentRuns = await Promise.all(
+        (await storage.getImportRuns(teamId)).map((ir) =>
+          storage.getEnrichmentRunByImportId(ir.id)
+        )
+      );
+
+      type StoredClassification = Awaited<ReturnType<typeof storage.getNoteClassificationsByEnrichmentRun>>[number];
+      let classification: StoredClassification | undefined;
+      for (const er of allEnrichmentRuns) {
+        if (!er) continue;
+        const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
+        const match = erClassifications.find((c) => c.id === classificationId);
+        if (match) {
+          classification = match;
+          break;
+        }
+      }
+
+      if (!classification) {
+        return res.status(404).json({ message: "Classification not found" });
+      }
+
+      // P0-1 (F81): members must not approve/reject/reclassify classifications
+      // belonging to another author's private note. 404 to avoid confirming existence.
+      const classifiedNote = await storage.getNote(classification.noteId);
+      if (!classifiedNote || classifiedNote.teamId !== teamId || !canViewNote(classifiedNote, userId, member.role)) {
+        return res.status(404).json({ message: "Classification not found" });
+      }
+
+      const updated = await storage.updateNoteClassificationStatus(classificationId, status, userId);
+
+      // If approved, update the note's type (PRD-038: overrideType wins)
+      if (status === "approved") {
+        const noteTypeMap: Record<string, string> = {
+          Character: "character",
+          NPC: "npc",
+          Area: "area",
+          POI: "poi",
+          Quest: "quest",
+          SessionLog: "session_log",
+          Note: "note",
+        };
+        const typeToUse = overrideType || updated.inferredType;
+        const newNoteType = noteTypeMap[typeToUse] || "note";
+        await storage.updateNote(updated.noteId, { noteType: newNoteType as NoteType });
+      }
+
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to update classification" });
     }
   });
 
@@ -538,6 +618,10 @@ export async function registerTestRoutes(
       if (noteType === "session_log" && sessionDate) {
         const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
         if (existing) {
+          // P0-1 (F9): don't leak another author's private session content
+          if (!canViewNote(existing, userId, member.role)) {
+            return res.status(409).json({ message: "A private session already exists for this date" });
+          }
           // Return existing session instead of creating duplicate
           return res.status(200).json(existing);
         }

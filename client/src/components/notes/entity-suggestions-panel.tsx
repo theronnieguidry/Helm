@@ -136,27 +136,50 @@ export function EntitySuggestionsPanel({
     enabled: true,
   });
 
-  // PRD-026: AI Cleanup mutation
+  // Gap F70/F86 (PRD-026, truth-in-labeling): "Suggestions" runs the
+  // deterministic heuristics endpoint and is NOT gated behind the AI toggle;
+  // "AI Cleanup" below actually calls Haiku.
+  const suggestionsMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest(
+        "POST",
+        `/api/teams/${team.id}/session-logs/${sessionNoteId}/cleanup-suggestions`,
+        {
+          content,
+          mode: "baseline",
+          includeLow: true,
+        }
+      );
+      return response.json() as Promise<CleanupSuggestionsResponse>;
+    },
+    onSuccess: (data: CleanupSuggestionsResponse, _vars, _ctx) => {
+      setCleanupData(data);
+      toast({
+        title: "Suggestions ready",
+        description: `Found ${data.relationshipSuggestions.length} relationship and ${data.questSuggestions.length} quest suggestions.`,
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Failed to compute suggestions",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // PRD-026: AI Cleanup mutation — always calls the Haiku-backed
+  // extract-entities endpoint (gap F70: it previously ran deterministic
+  // heuristics for saved sessions while claiming to be AI).
   const aiCleanupMutation = useMutation({
     mutationFn: async () => {
-      const response = sessionNoteId
-        ? await apiRequest(
-            "POST",
-            `/api/teams/${team.id}/session-logs/${sessionNoteId}/cleanup-suggestions`,
-            {
-              content,
-              mode: "ai",
-              includeLow: true,
-            }
-          )
-        : await apiRequest(
-            "POST",
-            `/api/teams/${team.id}/extract-entities`,
-            { content }
-          );
+      const response = await apiRequest(
+        "POST",
+        `/api/teams/${team.id}/extract-entities`,
+        { content }
+      );
       return response.json();
     },
-    onSuccess: (data: CleanupSuggestionsResponse | {
+    onSuccess: (data: {
       entities: Array<{
         name: string;
         type: "npc" | "place" | "quest" | "item" | "faction";
@@ -172,25 +195,6 @@ export function EntitySuggestionsPanel({
         confidence: number;
       }>;
     }) => {
-      if ("relationshipSuggestions" in data) {
-        setAiEntities(data.entities);
-        setCleanupData(data);
-        setAiRelationships(
-          data.relationshipSuggestions.map((relationship) => ({
-            entity1: relationship.fromEntityText,
-            entity2: relationship.toEntityText,
-            relationship: relationship.relationshipType,
-            confidence: relationship.confidence,
-          }))
-        );
-
-        toast({
-          title: "AI Cleanup Complete",
-          description: `Found ${data.entities.length} entities, ${data.relationshipSuggestions.length} relationships, and ${data.questSuggestions.length} quest suggestions.`,
-        });
-        return;
-      }
-
       // Convert AI entities to DetectedEntity format
       const converted: DetectedEntity[] = data.entities.map((e, idx) => ({
         id: `ai-${idx}-${e.name.toLowerCase().replace(/\s+/g, "-")}`,
@@ -213,6 +217,11 @@ export function EntitySuggestionsPanel({
         title: "AI Cleanup Complete",
         description: `Found ${data.entities.length} entities and ${data.relationships.length} relationships.`,
       });
+
+      // Refresh the structured suggestion sections alongside the AI results
+      if (sessionNoteId) {
+        suggestionsMutation.mutate();
+      }
     },
     onError: (error: Error & { message?: string }) => {
       // Check for subscription error
@@ -330,6 +339,15 @@ export function EntitySuggestionsPanel({
     },
   });
 
+  // Gap F85 (PRD-049 FR-2): entity detail queries share the
+  // ["/api/teams", teamId, "notes"] prefix, so invalidating it refreshes both
+  // the list and any open entity page after backlink/relationship changes.
+  const invalidateNoteQueries = useCallback(() => {
+    queryClient.invalidateQueries({
+      queryKey: ["/api/teams", team.id, "notes"],
+    });
+  }, [team.id]);
+
   // Create backlink mutation
   const createBacklinkMutation = useMutation({
     mutationFn: async (data: {
@@ -357,6 +375,7 @@ export function EntitySuggestionsPanel({
       );
       return response.json();
     },
+    onSuccess: invalidateNoteQueries,
   });
 
   // PRD-047 FR-3: undo removes the backlink created by Link
@@ -367,6 +386,7 @@ export function EntitySuggestionsPanel({
         `/api/teams/${team.id}/backlinks/${backlinkId}`
       );
     },
+    onSuccess: invalidateNoteQueries,
   });
 
   const createRelationshipMutation = useMutation({
@@ -389,6 +409,7 @@ export function EntitySuggestionsPanel({
       );
       return response.json();
     },
+    onSuccess: invalidateNoteQueries,
   });
 
   // PRD-047: capture a bounded evidence window around a mention (±200 chars)
@@ -408,10 +429,10 @@ export function EntitySuggestionsPanel({
 
   // PRD-049 FR-4: refresh suggestions after link/accept actions without a reload
   const refreshCleanupSuggestions = useCallback(() => {
-    if (cleanupData && sessionNoteId && !aiCleanupMutation.isPending) {
-      aiCleanupMutation.mutate();
+    if (cleanupData && sessionNoteId && !suggestionsMutation.isPending) {
+      suggestionsMutation.mutate();
     }
-  }, [cleanupData, sessionNoteId, aiCleanupMutation]);
+  }, [cleanupData, sessionNoteId, suggestionsMutation]);
 
   // Handle accept action
   const handleAccept = useCallback(
@@ -899,6 +920,9 @@ export function EntitySuggestionsPanel({
       title: "Bulk accept complete",
       description: `Created ${created} entities with ${linked} relationships.`,
     });
+
+    // Gap F87 (PRD-049 FR-4): newly created notes can resolve pending suggestions
+    refreshCleanupSuggestions();
   }, [
     highConfidenceEntities,
     persistence,
@@ -913,6 +937,7 @@ export function EntitySuggestionsPanel({
     sourceImportRunId, // PRD-034
     toast,
     extractEvidenceSnippet,
+    refreshCleanupSuggestions,
   ]);
 
   // Navigate to session review
@@ -983,7 +1008,32 @@ export function EntitySuggestionsPanel({
                     Review All
                   </Button>
                 )}
-                {/* PRD-028: AI Cleanup button - show if member has AI enabled */}
+                {/* Gap F86: deterministic relationship/quest suggestions are
+                    heuristics, not AI - available to every member. */}
+                {sessionNoteId && content.length > 50 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => suggestionsMutation.mutate()}
+                    disabled={suggestionsMutation.isPending}
+                    className="text-xs"
+                  >
+                    {suggestionsMutation.isPending ? (
+                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-3 w-3 mr-1" />
+                    )}
+                    Suggestions
+                    {cleanupData && (
+                      <Badge variant="secondary" className="ml-1 text-xs">
+                        {cleanupData.relationshipSuggestions.length +
+                          cleanupData.questSuggestions.length}
+                      </Badge>
+                    )}
+                  </Button>
+                )}
+                {/* PRD-028: AI Cleanup button - show if member has AI enabled.
+                    Gap F70: this now always calls the Haiku endpoint. */}
                 {memberAiEnabled && content.length > 50 && (
                   <Button
                     size="sm"

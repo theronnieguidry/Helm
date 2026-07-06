@@ -18,10 +18,13 @@ import {
   Users,
   FileText,
   AlertCircle,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { format } from "date-fns";
+import { EnrichmentReviewDialog } from "@/components/enrichment-review-dialog";
 
 interface ImportRunOptions {
   importEmptyPages: boolean;
@@ -59,6 +62,9 @@ interface ImportManagementProps {
 export function ImportManagement({ teamId, isDM, currentUserId }: ImportManagementProps) {
   const { toast } = useToast();
   const [deleteTarget, setDeleteTarget] = useState<ImportRun | null>(null);
+  // PRD-016 / P0-4: enrichment run currently open in the review dialog
+  const [reviewEnrichmentRunId, setReviewEnrichmentRunId] = useState<string | null>(null);
+  const [enrichTargetId, setEnrichTargetId] = useState<string | null>(null);
 
   const { data: imports, isLoading } = useQuery<ImportRun[]>({
     queryKey: ["/api/teams", teamId, "imports"],
@@ -100,6 +106,58 @@ export function ImportManagement({ teamId, isDM, currentUserId }: ImportManageme
       });
     },
   });
+
+  // PRD-016 / P0-4: Open (or start) the AI enrichment review for an import.
+  // There is no read endpoint exposing an import's enrichment run, so we use
+  // POST /enrich: a 400 response means a run already exists and returns its id
+  // (no side effect); an OK response means a new enrichment was started.
+  const enrichMutation = useMutation({
+    mutationFn: async (importId: string) => {
+      const response = await fetch(`/api/teams/${teamId}/imports/${importId}/enrich`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        credentials: "include",
+      });
+      const data = await response.json();
+      if (response.ok && data.enrichmentRunId) {
+        return { enrichmentRunId: data.enrichmentRunId as string, started: true };
+      }
+      if (response.status === 400 && data.enrichmentRunId) {
+        // Enrichment already exists for this import - review it
+        return { enrichmentRunId: data.enrichmentRunId as string, started: false };
+      }
+      throw new Error(data.message || "Failed to load AI suggestions");
+    },
+    onSuccess: ({ enrichmentRunId, started }) => {
+      if (started) {
+        toast({
+          title: "AI enrichment started",
+          description: "Notes are being analyzed. Suggestions will appear when ready.",
+        });
+      }
+      setReviewEnrichmentRunId(enrichmentRunId);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "AI suggestions unavailable",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+    onSettled: () => {
+      setEnrichTargetId(null);
+    },
+  });
+
+  const handleReviewDialogChange = (open: boolean) => {
+    if (!open) {
+      setReviewEnrichmentRunId(null);
+      // Approvals in the dialog change note types and clear needs-review items
+      queryClient.invalidateQueries({ queryKey: ["/api/teams", teamId, "notes", "needs-review"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/teams", teamId, "notes"] });
+    }
+  };
 
   const canDelete = (importRun: ImportRun) => {
     return isDM || importRun.createdByUserId === currentUserId;
@@ -159,18 +217,51 @@ export function ImportManagement({ teamId, isDM, currentUserId }: ImportManageme
             )}
           </div>
 
-          {canDelete(importRun) && (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setDeleteTarget(importRun)}
-              className="text-destructive hover:text-destructive"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          )}
+          <div className="flex items-center gap-1 shrink-0 ml-2">
+            {importRun.status === "completed" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1 text-primary hover:text-primary"
+                onClick={() => {
+                  setEnrichTargetId(importRun.id);
+                  enrichMutation.mutate(importRun.id);
+                }}
+                disabled={enrichMutation.isPending}
+                aria-label="Review AI suggestions"
+              >
+                {enrichMutation.isPending && enrichTargetId === importRun.id ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                <span className="hidden sm:inline">AI suggestions</span>
+              </Button>
+            )}
+
+            {canDelete(importRun) && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setDeleteTarget(importRun)}
+                className="text-destructive hover:text-destructive"
+                aria-label="Delete import"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
         </div>
       ))}
+
+      {reviewEnrichmentRunId && (
+        <EnrichmentReviewDialog
+          teamId={teamId}
+          enrichmentRunId={reviewEnrichmentRunId}
+          open={!!reviewEnrichmentRunId}
+          onOpenChange={handleReviewDialogChange}
+        />
+      )}
 
       <AlertDialog open={!!deleteTarget} onOpenChange={() => setDeleteTarget(null)}>
         <AlertDialogContent>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { format } from "date-fns";
 import type { NoteType } from "@shared/schema";
 
@@ -137,8 +137,29 @@ export function useSuggestionPersistence({
     }
   }, [enabled, teamId, currentDate]);
 
+  // Reload state when the storage key changes (e.g. the user opens a different
+  // session's editor, or the session log finishes loading and supplies its own
+  // date). Without this the state captured at mount would be written to the new
+  // key. Declared before the persist effect; skipPersistRef prevents the persist
+  // effect from writing pre-reload state to the new key in the same commit.
+  const initializedKeyRef = useRef(storageKey);
+  const skipPersistRef = useRef(false);
+  useEffect(() => {
+    if (initializedKeyRef.current === storageKey) return;
+    initializedKeyRef.current = storageKey;
+    skipPersistRef.current = true;
+    const stored = enabled ? loadState(storageKey) : null;
+    setDismissed(stored ? new Set(stored.dismissed) : new Set());
+    setReclassified(stored ? new Map(stored.reclassified) : new Map());
+    setCreated(stored ? new Set(stored.created) : new Set());
+  }, [storageKey, enabled]);
+
   // Persist state changes
   useEffect(() => {
+    if (skipPersistRef.current) {
+      skipPersistRef.current = false;
+      return;
+    }
     if (enabled && teamId) {
       saveState(storageKey, { dismissed, reclassified, created });
     }

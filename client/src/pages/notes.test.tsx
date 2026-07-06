@@ -3,7 +3,7 @@
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { render, screen, within, waitFor } from '@testing-library/react';
+import { render, screen, within, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import NotesPage from './notes';
@@ -39,6 +39,8 @@ vi.mock('@/components/ui/resizable', () => ({
 vi.mock('wouter', () => ({
   useLocation: () => ['/', vi.fn()],
   useSearch: () => '',
+  // F47 deep-link support reads /notes/:id; default to no match in tests
+  useRoute: () => [false, null],
 }));
 
 // Mock toast hook
@@ -386,6 +388,76 @@ describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
           })
         );
       }, { timeout: 2000 });
+    });
+  });
+
+  // P1-1 (PRD-008 FR-3/FR-4): session title and date are editable
+  describe('Session Title and Date Editing (PRD-008)', () => {
+    it('shows an editable title input and session date field for a selected session log', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(await screen.findByText('2024-01-15 — The Beginning'));
+
+      await waitFor(() => {
+        const titleInput = screen.getByLabelText('Title') as HTMLInputElement;
+        expect(titleInput).toBeInTheDocument();
+        expect(titleInput.value).toBe('2024-01-15 — The Beginning');
+      });
+
+      const dateInput = screen.getByLabelText('Session Date') as HTMLInputElement;
+      expect(dateInput).toBeInTheDocument();
+      expect(dateInput.value).toBe('2024-01-15');
+    });
+
+    it('persists a session date change via PATCH', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(await screen.findByText('2024-01-15 — The Beginning'));
+
+      const dateInput = await screen.findByLabelText('Session Date');
+      fireEvent.change(dateInput, { target: { value: '2024-01-10' } });
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'PATCH',
+          '/api/teams/team-1/notes/note-1',
+          expect.objectContaining({
+            sessionDate: expect.stringContaining('2024-01-10'),
+          })
+        );
+      });
+    });
+  });
+
+  // P1-6 (gap F43): switching notes flushes the unsaved draft for the note
+  // being left instead of silently dropping it.
+  describe('Draft Flush on Note Switch (PRD-019 FR-4)', () => {
+    it('PATCHes the previous note with its unsaved draft when switching selection', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Open the session note and type into it
+      await user.click(await screen.findByText('2024-01-15 — The Beginning'));
+      const textarea = await screen.findByLabelText('Content');
+      fireEvent.change(textarea, {
+        target: { value: 'Our adventure begins... and continues!' },
+      });
+
+      // Immediately switch to another note (inside the debounce window)
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'PATCH',
+          '/api/teams/team-1/notes/note-1',
+          expect.objectContaining({
+            content: 'Our adventure begins... and continues!',
+          })
+        );
+      });
     });
   });
 

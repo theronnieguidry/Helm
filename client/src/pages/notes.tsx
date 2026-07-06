@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { useRoute } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,17 @@ export default function NotesPage({ team }: NotesPageProps) {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isTodayMode, setIsTodayMode] = useState(true);
   const [isImportOpen, setIsImportOpen] = useState(false);
+
+  // Gap F47 (PRD-015 FR-4): honor /notes/:id deep links (imported wiki links,
+  // browser history) by selecting the target note instead of ignoring the param.
+  const [matchesNoteRoute, noteRouteParams] = useRoute("/notes/:id");
+  const routeNoteId = matchesNoteRoute ? noteRouteParams?.id : undefined;
+  useEffect(() => {
+    if (routeNoteId) {
+      setSelectedNoteId(routeNoteId);
+      setIsTodayMode(false);
+    }
+  }, [routeNoteId]);
 
   const { data: notes, isLoading } = useQuery<Note[]>({
     queryKey: ["/api/teams", team.id, "notes"],

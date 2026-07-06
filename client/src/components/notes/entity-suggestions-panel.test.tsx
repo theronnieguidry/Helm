@@ -456,6 +456,24 @@ describe("EntitySuggestionsPanel", () => {
     expect(screen.getByText("AI Cleanup")).toBeInTheDocument();
   });
 
+  // Gap F86: deterministic suggestions must not be gated behind the AI toggle
+  it("shows the Suggestions button for saved sessions even when member AI is disabled", () => {
+    render(
+      <EntitySuggestionsPanel
+        team={mockTeam}
+        sessionDate="2026-01-18"
+        content="Lord Blackwood entered the Silverwood Forest and told us many tales of the region."
+        sessionNote={mockSessionNote}
+        memberAiEnabled={false}
+        onNoteCreated={vi.fn()}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    expect(screen.getByText("Suggestions")).toBeInTheDocument();
+    expect(screen.queryByText("AI Cleanup")).not.toBeInTheDocument();
+  });
+
   // PRD-047: Link Existing Entity creates a backlink with visible evidence + undo
   describe("link existing entity (PRD-047)", () => {
     const existingNpc = {
