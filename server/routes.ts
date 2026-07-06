@@ -15,6 +15,7 @@ import {
   type NoteType,
   type QuestStatus,
   type ImportVisibility,
+  type ImportRun,
   type ImportRunStats,
   type RelationshipType,
   type EvidenceType,
@@ -47,6 +48,20 @@ import {
   ENABLE_NUCLINO_LINK_EVIDENCE,
 } from "./feature-flags";
 import { canViewNote, filterVisibleNotes } from "./note-visibility";
+import {
+  resolveEmptyPageSelection,
+  filterPagesToImport,
+  completeImportRun,
+  markImportRunFailed,
+} from "./import-run-helpers";
+import {
+  makeListNotesHandler,
+  makeTodaySessionHandler,
+  makeNeedsReviewHandler,
+  makeCreateNoteHandler,
+  makeUpdateNoteHandler,
+  makeDeleteNoteHandler,
+} from "./notes-handlers";
 
 // PRD-050 FR-3: explicit Nuclino links are high-confidence evidence.
 const NUCLINO_LINK_EVIDENCE_CONFIDENCE = 0.9;
@@ -710,68 +725,13 @@ export async function registerRoutes(
   });
 
   // Get notes
-  app.get("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const notes = await storage.getNotes(teamId);
-      // P0-1 (F0/F48): never ship other authors' private notes to members
-      res.json(filterVisibleNotes(notes, userId, member.role));
-    } catch (error) {
-      console.error("Error fetching notes:", error);
-      res.status(500).json({ message: "Failed to fetch notes" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes", isAuthenticated, makeListNotesHandler(storage));
 
   // PRD-019: Get today's session note
-  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const todaySession = await storage.findSessionByDate(teamId, new Date());
-      res.json(todaySession ?? null);
-    } catch (error) {
-      console.error("Error fetching today's session:", error);
-      res.status(500).json({ message: "Failed to fetch today's session" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, makeTodaySessionHandler(storage));
 
   // PRD-037: Get notes needing review (low-confidence AI classifications)
-  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const items = await storage.getPendingLowConfidenceClassifications(teamId);
-      // P0-1 (F81): don't expose private notes' titles/explanations to non-authors
-      const teamNotes = await storage.getNotes(teamId);
-      const visibleNoteIds = new Set(
-        filterVisibleNotes(teamNotes, userId, member.role).map((note) => note.id),
-      );
-      const visibleItems = items.filter((item) => visibleNoteIds.has(item.noteId));
-      res.json({ items: visibleItems, count: visibleItems.length });
-    } catch (error) {
-      console.error("Error fetching needs-review items:", error);
-      res.status(500).json({ message: "Failed to fetch needs-review items" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, makeNeedsReviewHandler(storage));
 
   // PRD-048: Single note detail endpoint with references and relationships
   app.get("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
@@ -999,112 +959,13 @@ export async function registerRoutes(
   });
 
   // Create note
-  app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      // PRD-034: Accept importRunId for suggestion-created entities to enable cascade delete
-      const { title, content, noteType, isPrivate, questStatus, contentBlocks, sessionDate, linkedNoteIds, importRunId } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      // For session_log type, check if one already exists for the given date (idempotency)
-      if (noteType === "session_log" && sessionDate) {
-        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
-        if (existing) {
-          // P0-1 (F9): don't leak another author's private session content
-          if (!canViewNote(existing, userId, member.role)) {
-            return res.status(409).json({ message: "A private session already exists for this date" });
-          }
-          // Return existing session instead of creating duplicate
-          return res.status(200).json(existing);
-        }
-      }
-
-      const note = await storage.createNote({
-        teamId,
-        authorId: userId,
-        title,
-        content,
-        noteType,
-        isPrivate,
-        questStatus,
-        contentBlocks,
-        sessionDate: sessionDate ? new Date(sessionDate) : undefined,
-        linkedNoteIds,
-        importRunId: importRunId || undefined, // PRD-034: Track import origin for cascade delete
-      });
-
-      res.json(note);
-    } catch (error) {
-      console.error("Error creating note:", error);
-      res.status(500).json({ message: "Failed to create note" });
-    }
-  });
+  app.post("/api/teams/:teamId/notes", isAuthenticated, makeCreateNoteHandler(storage));
 
   // Update note
-  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-      
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const existingNote = await storage.getNote(noteId);
-      if (!existingNote || existingNote.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (existingNote.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized to edit this note" });
-      }
-
-      const updateData = {
-        ...req.body,
-        sessionDate: req.body.sessionDate ? new Date(req.body.sessionDate) : req.body.sessionDate,
-      };
-
-      const note = await storage.updateNote(noteId, updateData);
-      res.json(note);
-    } catch (error) {
-      console.error("Error updating note:", error);
-      res.status(500).json({ message: "Failed to update note" });
-    }
-  });
+  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeUpdateNoteHandler(storage));
 
   // Delete note
-  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const existingNote = await storage.getNote(noteId);
-      if (!existingNote || existingNote.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (existingNote.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized to delete this note" });
-      }
-
-      await storage.deleteNote(noteId);
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error deleting note:", error);
-      res.status(500).json({ message: "Failed to delete note" });
-    }
-  });
+  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeDeleteNoteHandler(storage));
 
   // Get backlinks for a note (PRD-005)
   app.get("/api/teams/:teamId/notes/:noteId/backlinks", isAuthenticated, async (req: any, res) => {
@@ -1565,6 +1426,16 @@ export async function registerRoutes(
 
   // PRD-015: Nuclino Import - Commit import plan (updated for PRD-015A, PRD-030)
   app.post("/api/teams/:teamId/imports/nuclino/commit", isAuthenticated, async (req: any, res) => {
+    // P2-4 F51: track the active run and partial stats outside the try block so
+    // a mid-run crash records a truthful "failed" run instead of a phantom success.
+    let activeImportRun: ImportRun | null = null;
+    let totalPagesDetected = 0;
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let linksResolved = 0;
+    let emptyPagesImported = 0;
+    const warnings: string[] = [];
     try {
       const userId = req.user.claims.sub;
       const { teamId } = req.params;
@@ -1594,25 +1465,17 @@ export async function registerRoutes(
         }
       }
 
-      // PRD-042: Support granular empty page exclusion with backward compatibility
-      let excludedEmptyPageIds: Set<string>;
-      let importEmptyPages: boolean;
-
-      if (options?.excludedEmptyPageIds && Array.isArray(options.excludedEmptyPageIds)) {
-        // New format: explicit list of empty page IDs to exclude
-        excludedEmptyPageIds = new Set(options.excludedEmptyPageIds);
-        // Derive importEmptyPages for record-keeping: true if no pages are excluded
-        importEmptyPages = excludedEmptyPageIds.size === 0;
-      } else {
-        // Legacy format: boolean importEmptyPages (defaults to true)
-        importEmptyPages = options?.importEmptyPages !== false;
-        excludedEmptyPageIds = importEmptyPages
-          ? new Set()
-          : new Set(plan.pages.filter(p => p.isEmpty).map(p => p.sourcePageId));
-      }
+      // PRD-042 / P2-4 F50: Support granular empty page exclusion with backward
+      // compatibility. importEmptyPages is true only when zero empty pages were
+      // actually excluded (see resolveEmptyPageSelection).
+      const { excludedEmptyPageIds, importEmptyPages } = resolveEmptyPageSelection(
+        plan.pages,
+        options,
+      );
       const defaultVisibility: ImportVisibility = options?.defaultVisibility || "private";
       const isPrivate = defaultVisibility === "private";
-      const pagesToImport = plan.pages.filter(p => !p.isEmpty || !excludedEmptyPageIds.has(p.sourcePageId));
+      const pagesToImport = filterPagesToImport(plan.pages, excludedEmptyPageIds);
+      totalPagesDetected = plan.summary.totalPages;
 
       // PRD-035: Use client-provided operation ID or generate one for progress tracking
       const commitOperationId = req.body.operationId || `commit-${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1632,26 +1495,24 @@ export async function registerRoutes(
       }
 
       // PRD-015A: Create import run record FIRST
+      // P2-4 F51: the run starts "pending" and only becomes "completed" after
+      // all note-writing work has actually finished.
       const importRun = await storage.createImportRun({
         teamId,
         sourceSystem: "NUCLINO",
         createdByUserId: userId,
-        status: "completed",
+        status: "pending",
         options: {
           importEmptyPages,
           defaultVisibility,
         },
         stats: null, // Will update at end
       });
+      activeImportRun = importRun;
 
       // First pass: Create all notes to get their IDs
       const sourcePageIdToNoteId = new Map<string, string>();
       const noteTypeByNoteId = new Map<string, NoteType>();
-      let created = 0;
-      let updated = 0;
-      let skipped = 0;
-      let linksResolved = 0;
-      const warnings: string[] = [];
 
       // PRD-035: Initialize progress for creating phase
       updateImportProgress(commitOperationId, 'creating', 0, totalPages, 'Starting import...');
@@ -1737,6 +1598,11 @@ export async function registerRoutes(
             sourcePageIdToNoteId.set(page.sourcePageId, newNote.id);
             noteTypeByNoteId.set(newNote.id, noteType);
             created++;
+          }
+
+          // P2-4 F50: count empty pages that were ACTUALLY imported
+          if (page.isEmpty) {
+            emptyPagesImported++;
           }
         } catch (err) {
           console.error(`Error importing page ${page.title}:`, err);
@@ -1869,11 +1735,17 @@ export async function registerRoutes(
         notesCreated: created,
         notesUpdated: updated,
         notesSkipped: skipped,
-        emptyPagesImported: importEmptyPages ? plan.summary.emptyPages : 0,
+        // P2-4 F50: number of actually imported pages that were empty
+        // (supports PRD-042 partial empty-page selection)
+        emptyPagesImported,
         linksResolved,
         warningsCount: warnings.length,
       };
-      await storage.updateImportRun(importRun.id, { stats });
+      // P2-4 F51: note-writing work finished — the run is truthfully complete
+      await completeImportRun(storage, importRun.id, stats);
+      // Post-completion work (enrichment bookkeeping) must not flip the run to
+      // "failed": the notes are already written.
+      activeImportRun = null;
 
       // PRD-030: If using AI classifications, create enrichment run and store results
       let enrichmentRunId: string | null = null;
@@ -1975,6 +1847,19 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Error committing Nuclino import:", error);
+      // P2-4 F51: a crash mid-import must not leave a phantom "completed" (or
+      // stuck "pending") run — record it as failed with whatever stats we have.
+      if (activeImportRun) {
+        await markImportRunFailed(storage, activeImportRun.id, {
+          totalPagesDetected,
+          notesCreated: created,
+          notesUpdated: updated,
+          notesSkipped: skipped,
+          emptyPagesImported,
+          linksResolved,
+          warningsCount: warnings.length,
+        });
+      }
       res.status(500).json({ message: "Failed to commit import" });
     }
   });
@@ -2339,6 +2224,11 @@ export async function registerRoutes(
       // Get notes created by this import
       const notes = await storage.getNotesByImportRun(importId);
 
+      // P2-4 F49: snapshots identify pre-existing notes this run updated
+      // (vs. notes it created), so View Details can distinguish them.
+      const snapshots = await storage.getSnapshotsByImportRun(importId);
+      const updatedNoteIds = new Set(snapshots.map(s => s.noteId));
+
       // Get importer name
       const user = await storage.getUser(importRun.createdByUserId);
 
@@ -2347,7 +2237,12 @@ export async function registerRoutes(
         importerName: user
           ? `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email
           : "Unknown",
-        notes: notes.map(n => ({ id: n.id, title: n.title, noteType: n.noteType })),
+        notes: notes.map(n => ({
+          id: n.id,
+          title: n.title,
+          noteType: n.noteType,
+          wasUpdated: updatedNoteIds.has(n.id),
+        })),
       });
     } catch (error) {
       console.error("Error fetching import run:", error);

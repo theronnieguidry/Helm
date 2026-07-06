@@ -392,6 +392,37 @@ describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
   });
 
   // P1-1 (PRD-008 FR-3/FR-4): session title and date are editable
+  // P2-1 (PRD-004 FR-5): quest status badges + filter in the quest list
+  describe('Quest Status in Lists (PRD-004 FR-5)', () => {
+    it('shows a status badge on quest rows', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(screen.getByText('Quests'));
+      const questTitle = await screen.findByText('Find the Missing Artifact');
+      // note-3 fixture has questStatus 'active' — badge rendered inside the row
+      const row = questTitle.closest('button');
+      expect(within(row!).getByText('Active')).toBeInTheDocument();
+    });
+
+    it('filters quests by status via the chips', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(screen.getByText('Quests'));
+      await screen.findByTestId('quest-status-filter');
+
+      // Filter to a status with no quests
+      await user.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.queryByText('Find the Missing Artifact')).not.toBeInTheDocument();
+      expect(screen.getByText('No items')).toBeInTheDocument();
+
+      // Back to All restores the quest
+      await user.click(screen.getByRole('button', { name: 'All' }));
+      expect(await screen.findByText('Find the Missing Artifact')).toBeInTheDocument();
+    });
+  });
+
   describe('Session Title and Date Editing (PRD-008)', () => {
     it('shows an editable title input and session date field for a selected session log', async () => {
       const user = userEvent.setup();

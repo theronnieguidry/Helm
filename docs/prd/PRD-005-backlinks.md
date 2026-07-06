@@ -246,3 +246,21 @@ For performance with large session histories:
 2. Should we show a "mentioned in X sessions" summary on entity cards in lists?
 3. How to handle backlinks when entities are merged?
 4. Should there be a graph visualization of entity relationships via backlinks?
+
+
+---
+
+## Amendment (2026-07-06) — FR-3/FR-4 delivered via the offset-based model
+
+- FR-3 (navigate to referenced block + highlight): clicking a "Referenced in Sessions"
+  entry opens the source note and scrolls to/selects the exact mention using the
+  backlink's stored start/end offsets (text selection serves as the highlight in the
+  plain-text editor). Implemented in `note-detail-sections.tsx` → `notes.tsx` →
+  `notes-editor-panel.tsx`.
+- FR-4 (backlinks reflect current state): on any content edit, outgoing backlinks are
+  re-anchored by `server/backlink-reindex.ts` (shared PATCH handler): exact snippet found →
+  offsets refreshed; snippet gone but target title still mentioned → snippet rebuilt around
+  the title; mention entirely gone → backlink removed. Unit tests in
+  `server/backlink-reindex.test.ts`.
+- The `?block=:blockId` deep-link pattern from the original spec is superseded by the
+  offset mechanism (see PRD-001 amendment).

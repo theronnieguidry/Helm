@@ -88,9 +88,19 @@ const completedEnrichment = {
   relationships: [],
 };
 
+// P2-4 F49: fixture for GET /api/teams/:teamId/imports/:importId (View details)
+const importDetailsFixture = {
+  ...completedImport,
+  notes: [
+    { id: "note-1", title: "Gandalf the Grey", noteType: "npc", wasUpdated: false },
+    { id: "note-2", title: "Session 12 Recap", noteType: "session_log", wasUpdated: true },
+  ],
+};
+
 let importsFixture: unknown[];
 let enrichPostResponse: { body: unknown; status: number };
 let enrichmentFixture: unknown;
+let importDetailsResponse: { body: unknown; status: number };
 
 function jsonResponse(body: unknown, status = 200) {
   return {
@@ -109,6 +119,10 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => 
   }
   if (/\/imports\/[^/]+\/enrich$/.test(url) && method === "POST") {
     return jsonResponse(enrichPostResponse.body, enrichPostResponse.status);
+  }
+  // P2-4 F49: import run details for the View Details dialog
+  if (/\/imports\/[^/]+$/.test(url) && method === "GET") {
+    return jsonResponse(importDetailsResponse.body, importDetailsResponse.status);
   }
   if (url.includes("/enrichments/") && method === "GET") {
     return jsonResponse(enrichmentFixture);
@@ -143,6 +157,7 @@ beforeEach(() => {
     status: 400,
   };
   enrichmentFixture = completedEnrichment;
+  importDetailsResponse = { body: importDetailsFixture, status: 200 };
 });
 
 describe("ImportManagement AI suggestions button (P0-4)", () => {
@@ -260,5 +275,90 @@ describe("ImportManagement AI suggestions button (P0-4)", () => {
       );
     });
     expect(screen.queryByText("Review AI Suggestions")).not.toBeInTheDocument();
+  });
+});
+
+describe("ImportManagement view details dialog (P2-4 F49)", () => {
+  it("renders a View import details action on every import row", async () => {
+    importsFixture = [completedImport, failedImport];
+    renderImportManagement();
+
+    const buttons = await screen.findAllByRole("button", {
+      name: /view import details/i,
+    });
+    expect(buttons).toHaveLength(2);
+  });
+
+  it("opens the details dialog listing the run's notes with type and created/updated badges", async () => {
+    renderImportManagement();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /view import details/i })
+    );
+
+    // Dialog opens and fetches the run details
+    expect(await screen.findByText("Import Details")).toBeInTheDocument();
+    expect(await screen.findByText("Gandalf the Grey")).toBeInTheDocument();
+    expect(screen.getByText("Session 12 Recap")).toBeInTheDocument();
+
+    // Count summary from the run's notes and stats
+    expect(
+      screen.getByText(/2 notes in this import \(3 created, 0 updated\)/)
+    ).toBeInTheDocument();
+
+    // noteType badges
+    expect(screen.getByText("npc")).toBeInTheDocument();
+    expect(screen.getByText("session_log")).toBeInTheDocument();
+
+    // created/updated indicator (data distinguishes via wasUpdated)
+    expect(screen.getByText("created")).toBeInTheDocument();
+    expect(screen.getByText("updated")).toBeInTheDocument();
+
+    // Details were fetched from the PRD-015A endpoint
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/teams/team-1/imports/imp-1",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
+  it("shows a loading state while details are being fetched", async () => {
+    // Defer the details response so the loading state is observable
+    let resolveDetails: (value: Response) => void;
+    const deferred = new Promise<Response>((resolve) => {
+      resolveDetails = resolve;
+    });
+    fetchMock.mockImplementationOnce(async (input: RequestInfo | URL) => {
+      // First call is the imports list
+      expect(String(input)).toBe("/api/teams/team-1/imports");
+      return jsonResponse(importsFixture);
+    });
+    fetchMock.mockImplementationOnce(() => deferred);
+
+    renderImportManagement();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /view import details/i })
+    );
+
+    expect(await screen.findByText(/loading import details/i)).toBeInTheDocument();
+
+    resolveDetails!(jsonResponse(importDetailsFixture));
+    expect(await screen.findByText("Gandalf the Grey")).toBeInTheDocument();
+    expect(screen.queryByText(/loading import details/i)).not.toBeInTheDocument();
+  });
+
+  it("closes the dialog when dismissed", async () => {
+    renderImportManagement();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /view import details/i })
+    );
+    await screen.findByText("Gandalf the Grey");
+
+    // Radix dialog exposes a Close button
+    fireEvent.click(screen.getByRole("button", { name: /close/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("Import Details")).not.toBeInTheDocument();
+    });
   });
 });

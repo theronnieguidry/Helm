@@ -16,6 +16,14 @@ import { generateSessionCandidates } from "@shared/recurrence";
 import { buildCleanupSuggestions, type CleanupSuggestionMode } from "@shared/cleanup-suggestions";
 import { canonicalizeSourceBlockId } from "@shared/text-hash";
 import { canViewNote, filterVisibleNotes } from "../note-visibility";
+import {
+  makeListNotesHandler,
+  makeTodaySessionHandler,
+  makeNeedsReviewHandler,
+  makeCreateNoteHandler,
+  makeUpdateNoteHandler,
+  makeDeleteNoteHandler,
+} from "../notes-handlers";
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -274,65 +282,13 @@ export async function registerTestRoutes(
     }
   });
 
-  app.get("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const notes = await storage.getNotes(teamId);
-      // P0-1 (F0/F48): shared predicate with production route (DM sees all)
-      res.json(filterVisibleNotes(notes, userId, member.role));
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch notes" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes", isAuthenticated, makeListNotesHandler(storage));
 
   // PRD-019: Get today's session note
-  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const todaySession = await storage.findSessionByDate(teamId, new Date());
-      res.json(todaySession ?? null);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch today's session" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, makeTodaySessionHandler(storage));
 
   // PRD-037: Get notes needing review (low-confidence AI classifications)
-  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const items = await storage.getPendingLowConfidenceClassifications(teamId);
-      // P0-1 (F81): don't expose private notes' titles/explanations to non-authors
-      const teamNotes = await storage.getNotes(teamId);
-      const visibleNoteIds = new Set(
-        filterVisibleNotes(teamNotes, userId, member.role).map((note) => note.id),
-      );
-      const visibleItems = items.filter((item) => visibleNoteIds.has(item.noteId));
-      res.json({ items: visibleItems, count: visibleItems.length });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch needs-review items" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, makeNeedsReviewHandler(storage));
 
   // PRD-037/PRD-038: Approve/reject/reclassify a low-confidence classification
   // (mirrors production route in server/routes.ts, including the P0-1/F81 privacy guard)
@@ -603,99 +559,11 @@ export async function registerTestRoutes(
     }
   });
 
-  app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { title, content, noteType, isPrivate, questStatus, contentBlocks, sessionDate, linkedNoteIds } = req.body;
+  app.post("/api/teams/:teamId/notes", isAuthenticated, makeCreateNoteHandler(storage));
 
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
+  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeUpdateNoteHandler(storage));
 
-      // PRD-023: For session_log type, check if one already exists for the given date (idempotency)
-      if (noteType === "session_log" && sessionDate) {
-        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
-        if (existing) {
-          // P0-1 (F9): don't leak another author's private session content
-          if (!canViewNote(existing, userId, member.role)) {
-            return res.status(409).json({ message: "A private session already exists for this date" });
-          }
-          // Return existing session instead of creating duplicate
-          return res.status(200).json(existing);
-        }
-      }
-
-      const note = await storage.createNote({
-        teamId,
-        authorId: userId,
-        title,
-        content,
-        noteType,
-        isPrivate,
-        questStatus,
-        contentBlocks,
-        sessionDate: sessionDate ? new Date(sessionDate) : undefined,
-        linkedNoteIds,
-      });
-      res.json(note);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to create note" });
-    }
-  });
-
-  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const note = await storage.getNote(noteId);
-      if (!note || note.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (note.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Can only edit your own notes" });
-      }
-
-      const updated = await storage.updateNote(noteId, req.body);
-      res.json(updated);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update note" });
-    }
-  });
-
-  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const note = await storage.getNote(noteId);
-      if (!note || note.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (note.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Can only delete your own notes" });
-      }
-
-      await storage.deleteNote(noteId);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete note" });
-    }
-  });
+  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeDeleteNoteHandler(storage));
 
   app.get("/api/teams/:teamId/sessions", isAuthenticated, async (req: any, res) => {
     try {

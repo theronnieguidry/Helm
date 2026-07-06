@@ -19,12 +19,26 @@ critical/major claims were confirmed real; zero were refuted.** Minor/polish fin
 **Scoreboard**: 93 findings — 3 critical, 22 major, 53 minor, 15 polish.
 Branch: `claude/note-taking-completion-49gfvg` (PR #6, commit `de406b5`). Date: 2026-07-05.
 
-> **UPDATE (2026-07-06): all P0 and P1 items below are IMPLEMENTED** with tests on PR #6
-> (679 tests passing). That resolves all 3 criticals and the majors bundled into P0/P1:
-> F0, F2, F3, F9, F13, F17, F18, F42, F43, F47 (deep link + markdown rendering), F48,
-> F55, F56, F69, F70, F81, F85, plus bundled minors F27, F86, F87 and part of the F44/F78
-> test debt. Remaining open: the P2/P3 sections and the unbundled majors (F1, F19, F20,
-> F21, F31, F32, F33, F34, F49, F57, F58, F59) — see §3 P2 and §5 for detail.
+> **UPDATE (2026-07-06): all P0, P1, AND P2 items below are IMPLEMENTED** with tests on
+> PR #6 (721 tests passing). P0/P1 resolved all 3 criticals plus F0, F2, F3, F9, F13,
+> F17, F18, F42, F43, F47, F48, F55, F56, F69, F70, F81, F85, F27, F86, F87.
+> The P2 pass resolved F19, F20, F21 (review-mode + session-review test files now exist),
+> F29, F32, F33, F34, F37 (client-side filter), F38, F49, F50, F51, F66, plus the
+> prod/test route unification for the notes API surface (shared handlers in
+> server/notes-handlers.ts).
+>
+> **P2-2 decision (block substrate)**: resolved as the OFFSET-BASED model — backlink
+> clicks scroll to and select the exact mention via stored offsets, backlinks re-index
+> or are removed on content edits (server/backlink-reindex.ts), and PRD-001/004/005
+> carry amendments documenting the decision. The block-based editor was NOT built (F1
+> formally superseded, F11 moot).
+> **P2-1 decision (quest transitions)**: status badges/filter/hover shipped; the strict
+> FR-2 transition state machine was deliberately NOT enforced (fights capture-first) —
+> F31 closed as won't-fix per the PRD-004 amendment.
+>
+> Still open by choice: P3 hygiene items, the design-review recommendations (§6),
+> and unbundled majors F57 (diff-preview filters), F58 (enrichment undo UI +
+> noteType revert), F59 (Item/Faction types — recommend descoping in PRD-030).
 
 ---
 

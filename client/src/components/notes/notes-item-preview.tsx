@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Note, NoteType, Team } from "@shared/schema";
+import { QUEST_STATUS_LABELS, QUEST_STATUS_COLORS } from "@shared/schema";
 import { NOTE_TYPES } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 
@@ -93,6 +94,15 @@ export function NotesItemPreview({
             >
               {NOTE_TYPE_LABELS[note.noteType]}
             </Badge>
+            {/* P2-1 (PRD-004 FR-5): quest status visible in the hover preview */}
+            {note.noteType === "quest" && (
+              <Badge
+                variant="secondary"
+                className={`shrink-0 text-xs ${QUEST_STATUS_COLORS[note.questStatus || "lead"]}`}
+              >
+                {QUEST_STATUS_LABELS[note.questStatus || "lead"]}
+              </Badge>
+            )}
           </div>
 
           {contentSnippet && (

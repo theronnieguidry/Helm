@@ -154,9 +154,21 @@ export default function NotesPage({ team }: NotesPageProps) {
     }
   };
 
-  const handleOpenNote = (noteId: string) => {
+  // P2-2 (PRD-005 FR-3): carry mention offsets so the editor can scroll to
+  // and select the exact reference after opening the note.
+  const [pendingHighlight, setPendingHighlight] = useState<{
+    noteId: string;
+    start: number;
+    end: number;
+  } | null>(null);
+
+  const handleOpenNote = (
+    noteId: string,
+    highlight?: { start: number; end: number }
+  ) => {
     setSelectedNoteId(noteId);
     setIsTodayMode(false);
+    setPendingHighlight(highlight ? { noteId, ...highlight } : null);
   };
 
   if (isLoading) {
@@ -232,6 +244,8 @@ export default function NotesPage({ team }: NotesPageProps) {
             onNoteCreated={handleNoteCreated}
             onNoteDeleted={handleNoteDeleted}
             onOpenNote={handleOpenNote}
+            pendingHighlight={pendingHighlight}
+            onHighlightConsumed={() => setPendingHighlight(null)}
           />
         </ResizablePanel>
       </ResizablePanelGroup>

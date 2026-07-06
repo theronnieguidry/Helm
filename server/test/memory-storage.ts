@@ -349,6 +349,7 @@ export class MemoryStorage implements IStorage {
       authorId: note.authorId,
       title: note.title,
       content: note.content ?? null,
+      reviewedAt: note.reviewedAt ?? null,
       noteType,
       isPrivate: note.isPrivate ?? false,
       parentNoteId: note.parentNoteId ?? null,

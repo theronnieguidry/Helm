@@ -29,11 +29,13 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  CheckCircle2,
   X,
   ArrowRight,
   MoreHorizontal,
 } from "lucide-react";
-import type { Note, NoteType, Team } from "@shared/schema";
+import type { Note, NoteType, QuestStatus, Team } from "@shared/schema";
+import { QUEST_STATUSES, QUEST_STATUS_LABELS, QUEST_STATUS_COLORS } from "@shared/schema";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 
@@ -174,6 +176,8 @@ export function NotesLeftPanel({
   const [expandedSections, setExpandedSections] = useState<string[]>([
     "sessions",
   ]);
+  // P2-1 (PRD-004 FR-5, gap F32): filter quests by lifecycle status
+  const [questStatusFilter, setQuestStatusFilter] = useState<QuestStatus | "all">("all");
   // PRD-037: State for needs review section
   const [isNeedsReviewExpanded, setIsNeedsReviewExpanded] = useState(true);
   // PRD-038: State for expanded review item
@@ -431,7 +435,14 @@ export function NotesLeftPanel({
           className="px-2"
         >
           {FILTER_CATEGORIES.map((category) => {
-            const categoryNotes = notesByCategory[category.key] || [];
+            const allCategoryNotes = notesByCategory[category.key] || [];
+            // P2-1: quests can be narrowed to a single lifecycle status
+            const categoryNotes =
+              category.key === "quests" && questStatusFilter !== "all"
+                ? allCategoryNotes.filter(
+                    (note) => (note.questStatus || "lead") === questStatusFilter
+                  )
+                : allCategoryNotes;
             const Icon = category.icon;
 
             return (
@@ -445,11 +456,33 @@ export function NotesLeftPanel({
                     <Icon className={cn("h-4 w-4", category.color)} />
                     <span className="text-sm">{category.label}</span>
                     <Badge variant="secondary" className="ml-1 h-5 px-1.5">
-                      {categoryNotes.length}
+                      {allCategoryNotes.length}
                     </Badge>
                   </div>
                 </AccordionTrigger>
                 <AccordionContent className="pb-2">
+                  {category.key === "quests" && allCategoryNotes.length > 0 && (
+                    <div
+                      className="flex flex-wrap gap-1 px-2 pb-2"
+                      data-testid="quest-status-filter"
+                    >
+                      {(["all", ...QUEST_STATUSES] as const).map((status) => (
+                        <button
+                          key={status}
+                          type="button"
+                          onClick={() => setQuestStatusFilter(status)}
+                          className={cn(
+                            "text-xs px-2 py-0.5 rounded-full border transition-colors",
+                            questStatusFilter === status
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-transparent text-muted-foreground hover:bg-accent"
+                          )}
+                        >
+                          {status === "all" ? "All" : QUEST_STATUS_LABELS[status]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {categoryNotes.length === 0 ? (
                     <p className="text-xs text-muted-foreground pl-6 py-2">
                       No items
@@ -479,6 +512,25 @@ export function NotesLeftPanel({
                                 </span>
                               ) : null}
                               <span className="truncate">{note.title}</span>
+                              {/* P2-1 (PRD-004 FR-5): quest lifecycle at a glance */}
+                              {note.noteType === "quest" && (
+                                <Badge
+                                  variant="secondary"
+                                  className={cn(
+                                    "text-xs py-0 px-1.5 flex-shrink-0",
+                                    QUEST_STATUS_COLORS[note.questStatus || "lead"]
+                                  )}
+                                >
+                                  {QUEST_STATUS_LABELS[note.questStatus || "lead"]}
+                                </Badge>
+                              )}
+                              {/* PRD-003 FR-5 (gap F19): reviewed sessions are marked */}
+                              {note.noteType === "session_log" && note.reviewedAt && (
+                                <CheckCircle2
+                                  className="h-3.5 w-3.5 text-green-500 flex-shrink-0"
+                                  aria-label="Session reviewed"
+                                />
+                              )}
                             </div>
                           </button>
                         </NotesItemPreview>

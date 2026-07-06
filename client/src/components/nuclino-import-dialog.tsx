@@ -398,8 +398,30 @@ export function NuclinoImportDialog({
       });
     },
     onError: (error: Error) => {
-      setErrorMessage(error.message);
       setCurrentOperationId(null); // PRD-035: Stop polling on error
+
+      // P2-4 F66: the 5-minute AI preview cache expired between preview and
+      // confirm. Instead of dead-ending on an error screen, transparently
+      // re-run the AI analysis so the user lands on a fresh diff preview.
+      if (error.message.includes("AI preview not found or expired") && parseResult) {
+        toast({
+          title: "AI preview expired",
+          description: "Re-running AI analysis to generate a fresh preview...",
+        });
+        setAiPreviewResult(null);
+        setAiPreviewError(null);
+        const opId = generateOperationId();
+        setCurrentOperationId(opId);
+        setState("ai-diff-loading");
+        aiPreviewMutation.mutate({
+          importPlanId: parseResult.importPlanId,
+          operationId: opId,
+          aiOptions: pcNames.length > 0 ? { playerCharacterNames: pcNames } : undefined,
+        });
+        return;
+      }
+
+      setErrorMessage(error.message);
       setState("error");
     },
   });

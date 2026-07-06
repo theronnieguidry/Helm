@@ -85,7 +85,10 @@ interface NotesEditorPanelProps {
   memberRole?: string; // PRD-048: role-gates relationship deletion
   onNoteCreated: (note: Note) => void;
   onNoteDeleted: (noteId: string) => void;
-  onOpenNote?: (noteId: string) => void;
+  onOpenNote?: (noteId: string, highlight?: { start: number; end: number }) => void;
+  // P2-2 (PRD-005 FR-3): mention offsets to scroll to + select after opening
+  pendingHighlight?: { noteId: string; start: number; end: number } | null;
+  onHighlightConsumed?: () => void;
 }
 
 export function NotesEditorPanel({
@@ -99,6 +102,8 @@ export function NotesEditorPanel({
   onNoteCreated,
   onNoteDeleted,
   onOpenNote,
+  pendingHighlight,
+  onHighlightConsumed,
 }: NotesEditorPanelProps) {
   const { toast } = useToast();
   const [draftTitle, setDraftTitle] = useState("");
@@ -115,6 +120,7 @@ export function NotesEditorPanel({
   // text before the editor switches away from it.
   const prevNoteRef = useRef<Note | null>(null);
   const draftsRef = useRef({ title: "", content: "", questStatus: "lead" as QuestStatus });
+  const contentRef = useRef<HTMLTextAreaElement | null>(null);
 
   const todayStr = format(new Date(), "yyyy-MM-dd");
 
@@ -184,6 +190,26 @@ export function NotesEditorPanel({
     setIsEditingImported(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNoteId, isTodayMode, todayStr]);
+
+  // P2-2 (PRD-005 FR-3): when a backlink reference opened this note with
+  // mention offsets, select the mention and scroll it into view. The text
+  // selection doubles as the highlight in a plain textarea.
+  useEffect(() => {
+    if (!pendingHighlight || pendingHighlight.noteId !== activeNoteId) return;
+    const el = contentRef.current;
+    if (!el) return;
+    const { start, end } = pendingHighlight;
+    requestAnimationFrame(() => {
+      el.focus();
+      const safeStart = Math.min(start, el.value.length);
+      const safeEnd = Math.min(Math.max(end, safeStart), el.value.length);
+      el.setSelectionRange(safeStart, safeEnd);
+      const proportion = safeStart / Math.max(1, el.value.length);
+      el.scrollTop = Math.max(0, proportion * el.scrollHeight - el.clientHeight / 2);
+    });
+    onHighlightConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingHighlight, activeNoteId, draftContent]);
 
   // Create session mutation
   const createSessionMutation = useMutation({
@@ -495,6 +521,7 @@ export function NotesEditorPanel({
                 </Label>
                 <Textarea
                   id="content"
+                  ref={contentRef}
                   value={draftContent}
                   onChange={(e) => handleContentChange(e.target.value)}
                   placeholder={

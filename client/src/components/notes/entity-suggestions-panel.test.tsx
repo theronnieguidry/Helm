@@ -148,6 +148,7 @@ const mockSessionNote = {
   questStatus: null,
   contentBlocks: null,
   sessionDate: null,
+  reviewedAt: null,
   linkedNoteIds: null,
   sourceSystem: null,
   sourcePageId: null,

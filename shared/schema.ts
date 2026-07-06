@@ -150,7 +150,7 @@ export const QUEST_STATUSES = ["lead", "todo", "active", "done", "abandoned"] as
 export type QuestStatus = typeof QUEST_STATUSES[number];
 
 // Import run status (PRD-015A)
-export const IMPORT_RUN_STATUSES = ["completed", "failed", "deleted"] as const;
+export const IMPORT_RUN_STATUSES = ["pending", "completed", "failed", "deleted"] as const;
 export type ImportRunStatus = typeof IMPORT_RUN_STATUSES[number];
 
 // Import visibility options (PRD-015A)
@@ -213,6 +213,8 @@ export const notes = pgTable("notes", {
   contentBlocks: json("content_blocks").$type<ContentBlock[]>(),
   // PRD-004: Quest status field
   questStatus: text("quest_status").$type<QuestStatus>(),
+  // PRD-003 FR-5 (gap F19): set when a session log has been marked reviewed
+  reviewedAt: timestamp("reviewed_at"),
   // PRD-015: Import tracking fields
   sourceSystem: text("source_system"), // e.g., "NUCLINO"
   sourcePageId: text("source_page_id"), // e.g., 8-char hex ID from Nuclino filename
@@ -313,7 +315,7 @@ export const importRuns = pgTable("import_runs", {
   teamId: varchar("team_id").notNull(),
   sourceSystem: text("source_system").notNull(), // e.g., "NUCLINO"
   createdByUserId: varchar("created_by_user_id").notNull(),
-  status: text("status").notNull().$type<ImportRunStatus>().default("completed"),
+  status: text("status").notNull().$type<ImportRunStatus>().default("pending"),
   options: json("options").$type<ImportRunOptions>(),
   stats: json("stats").$type<ImportRunStats>(),
   createdAt: timestamp("created_at").defaultNow(),

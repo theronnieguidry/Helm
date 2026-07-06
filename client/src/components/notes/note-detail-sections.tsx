@@ -13,6 +13,8 @@ interface NoteDetailReferenceIn {
   id: string;
   sourceNoteId: string;
   sourceBlockId?: string | null;
+  startOffset?: number | null;
+  endOffset?: number | null;
   sourceNoteTitle: string | null;
   sourceNoteType: string | null;
   sourceNoteSessionDate: string | null;
@@ -74,7 +76,9 @@ interface NoteDetailSectionsProps {
   note: Note;
   userId: string;
   isDm: boolean;
-  onOpenNote?: (noteId: string) => void;
+  /** P2-2 (PRD-005 FR-3): highlight carries the mention offsets so the editor
+      can scroll to and select the exact reference. */
+  onOpenNote?: (noteId: string, highlight?: { start: number; end: number }) => void;
 }
 
 /**
@@ -174,7 +178,14 @@ export function NoteDetailSections({
               <button
                 key={reference.id}
                 type="button"
-                onClick={() => onOpenNote?.(reference.sourceNoteId)}
+                onClick={() =>
+                  onOpenNote?.(
+                    reference.sourceNoteId,
+                    reference.startOffset != null && reference.endOffset != null
+                      ? { start: reference.startOffset, end: reference.endOffset }
+                      : undefined
+                  )
+                }
                 className="w-full text-left p-3 rounded-lg border bg-muted/50 hover:bg-muted transition-colors"
                 data-testid={`session-reference-${reference.id}`}
               >

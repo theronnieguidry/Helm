@@ -13,6 +13,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
   Trash2,
   Lock,
   Users,
@@ -20,6 +28,7 @@ import {
   AlertCircle,
   Sparkles,
   Loader2,
+  Eye,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
@@ -46,11 +55,23 @@ interface ImportRun {
   teamId: string;
   sourceSystem: string;
   createdByUserId: string;
-  status: "completed" | "failed" | "deleted";
+  status: "pending" | "completed" | "failed" | "deleted";
   options: ImportRunOptions | null;
   stats: ImportRunStats | null;
   createdAt: string;
   importerName: string;
+}
+
+// P2-4 F49: note entry returned by GET /api/teams/:teamId/imports/:importId
+interface ImportRunNote {
+  id: string;
+  title: string;
+  noteType: string;
+  wasUpdated?: boolean;
+}
+
+interface ImportRunDetails extends ImportRun {
+  notes: ImportRunNote[];
 }
 
 interface ImportManagementProps {
@@ -65,6 +86,8 @@ export function ImportManagement({ teamId, isDM, currentUserId }: ImportManageme
   // PRD-016 / P0-4: enrichment run currently open in the review dialog
   const [reviewEnrichmentRunId, setReviewEnrichmentRunId] = useState<string | null>(null);
   const [enrichTargetId, setEnrichTargetId] = useState<string | null>(null);
+  // P2-4 F49: import run currently open in the View Details dialog
+  const [detailsImportId, setDetailsImportId] = useState<string | null>(null);
 
   const { data: imports, isLoading } = useQuery<ImportRun[]>({
     queryKey: ["/api/teams", teamId, "imports"],
@@ -75,6 +98,19 @@ export function ImportManagement({ teamId, isDM, currentUserId }: ImportManageme
       if (!response.ok) throw new Error("Failed to fetch imports");
       return response.json();
     },
+  });
+
+  // P2-4 F49: fetch details (run + its notes) for the View Details dialog
+  const { data: importDetails, isLoading: detailsLoading } = useQuery<ImportRunDetails>({
+    queryKey: ["/api/teams", teamId, "imports", detailsImportId],
+    queryFn: async () => {
+      const response = await fetch(`/api/teams/${teamId}/imports/${detailsImportId}`, {
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error("Failed to fetch import details");
+      return response.json();
+    },
+    enabled: !!detailsImportId,
   });
 
   const deleteMutation = useMutation({
@@ -218,6 +254,15 @@ export function ImportManagement({ teamId, isDM, currentUserId }: ImportManageme
           </div>
 
           <div className="flex items-center gap-1 shrink-0 ml-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setDetailsImportId(importRun.id)}
+              aria-label="View import details"
+            >
+              <Eye className="h-4 w-4" />
+            </Button>
+
             {importRun.status === "completed" && (
               <Button
                 variant="ghost"
@@ -253,6 +298,64 @@ export function ImportManagement({ teamId, isDM, currentUserId }: ImportManageme
           </div>
         </div>
       ))}
+
+      {/* P2-4 F49: View Details dialog listing the run's notes */}
+      <Dialog
+        open={!!detailsImportId}
+        onOpenChange={(open) => {
+          if (!open) setDetailsImportId(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Import Details</DialogTitle>
+            <DialogDescription>
+              Notes created or updated by this import.
+            </DialogDescription>
+          </DialogHeader>
+          {detailsLoading || !importDetails ? (
+            <div className="py-8 text-center text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin mx-auto mb-2" />
+              <p className="text-sm">Loading import details...</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                {importDetails.notes.length} note{importDetails.notes.length === 1 ? "" : "s"} in this import
+                {importDetails.stats
+                  ? ` (${importDetails.stats.notesCreated} created, ${importDetails.stats.notesUpdated} updated)`
+                  : ""}
+              </p>
+              <ScrollArea className="h-64 border rounded-lg">
+                <div className="p-2 space-y-1">
+                  {importDetails.notes.length === 0 ? (
+                    <p className="p-2 text-sm text-muted-foreground">
+                      No notes remain from this import.
+                    </p>
+                  ) : (
+                    importDetails.notes.map((note) => (
+                      <div
+                        key={note.id}
+                        className="flex items-center gap-2 p-2 rounded hover:bg-muted/50"
+                      >
+                        <Badge variant="secondary" className="text-xs">
+                          {note.noteType}
+                        </Badge>
+                        <span className="text-sm truncate flex-1">{note.title}</span>
+                        {typeof note.wasUpdated === "boolean" && (
+                          <Badge variant="outline" className="text-xs">
+                            {note.wasUpdated ? "updated" : "created"}
+                          </Badge>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {reviewEnrichmentRunId && (
         <EnrichmentReviewDialog

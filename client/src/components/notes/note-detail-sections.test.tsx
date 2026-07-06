@@ -115,7 +115,23 @@ describe("NoteDetailSections session references (PRD-048 FR-2/FR-5)", () => {
     renderSections({ onOpenNote });
 
     fireEvent.click(await screen.findByText("Session 2026-06-20"));
-    expect(onOpenNote).toHaveBeenCalledWith("session-1");
+    expect(onOpenNote).toHaveBeenCalledWith("session-1", undefined);
+  });
+
+  // P2-2 (PRD-005 FR-3): offsets travel with the navigation for scroll-to-mention
+  it("passes mention offsets with the navigation when the backlink has them", async () => {
+    detailFixture.referencesIn = [
+      {
+        ...(detailFixture.referencesIn![0] as object),
+        startOffset: 42,
+        endOffset: 48,
+      },
+    ] as NoteDetailResponse["referencesIn"];
+    const onOpenNote = vi.fn();
+    renderSections({ onOpenNote });
+
+    fireEvent.click(await screen.findByText("Session 2026-06-20"));
+    expect(onOpenNote).toHaveBeenCalledWith("session-1", { start: 42, end: 48 });
   });
 });
 
