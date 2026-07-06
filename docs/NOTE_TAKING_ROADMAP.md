@@ -232,10 +232,11 @@ recur across 3+ independent PRDs — treat deviations from them as a deliberate,
 
 ## 9. Open threads / things to verify if picking this back up
 
-- **PRD-023's optional phases**: a DB-level partial unique index on
-  `(team_id, DATE(session_date))` for session logs, and a one-time production duplicate-row
-  cleanup query, were marked optional/Phase 2-3 — confirm whether these ever landed, since
-  they're the "defense in depth" half of the fix (server-side idempotency, Phase 1, is done).
+- **See `NOTE_TAKING_GAP_REPORT.md`** (2026-07-05) for the full verified gap audit of every
+  claim in this file — including corrections to this section.
+- **PRD-023's optional phases**: the Phase-2 DB partial unique index DID land
+  (`shared/schema.ts:227-232`), but it cannot be applied to a production DB that still
+  contains duplicate rows, and the Phase-3 cleanup script was never checked in.
 - **GitHub issue #5** (Quest Keeper branding) is still open and unrelated to note-taking —
   quick two-file fix if picked up next.
 - **PR #6** (closes issues #1–#4 / PRD-047–050) is open as a draft; being watched via an
