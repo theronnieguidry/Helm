@@ -270,17 +270,29 @@ export const diceRolls = pgTable("dice_rolls", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// User Availability (PRD-009) - date-based personal availability
+// User Availability (PRD-009) - date-based personal availability.
+// Scheduling audit S1: a row is a RESPONSE — either an available time window
+// (team-timezone HH:MM) or an explicit "unavailable". Absence of a row means
+// "hasn't responded", which is what the reminder engine keys on.
+export const USER_AVAILABILITY_STATUS = ["available", "unavailable"] as const;
+export type UserAvailabilityStatus = typeof USER_AVAILABILITY_STATUS[number];
+
 export const userAvailability = pgTable("user_availability", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   teamId: varchar("team_id").notNull(),
   userId: varchar("user_id").notNull(),
+  // Normalized to UTC midnight of the calendar day (audit S5/S14)
   date: timestamp("date").notNull(),
-  startTime: text("start_time").notNull(), // HH:MM format
-  endTime: text("end_time").notNull(),     // HH:MM format
+  status: text("status").notNull().$type<UserAvailabilityStatus>().default("available"),
+  startTime: text("start_time"), // HH:MM, team timezone; null when unavailable
+  endTime: text("end_time"),     // HH:MM, team timezone; null when unavailable
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => [
+  // Audit S14: one response per member per day — replaces the racy
+  // read-then-409 as the real guarantee
+  uniqueIndex("user_availability_unique_user_date").on(table.teamId, table.userId, table.date),
+]);
 
 // Backlinks table (PRD-005)
 export const backlinks = pgTable("backlinks", {

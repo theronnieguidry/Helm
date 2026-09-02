@@ -33,6 +33,7 @@ import {
   type ContentBlock,
   type SessionStatus,
 } from "@shared/schema";
+import { availabilityDateKey } from "@shared/scheduling";
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
@@ -647,18 +648,15 @@ export class MemoryStorage implements IStorage {
   }
 
   async getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined> {
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Audit S5: same calendar-day matching as DatabaseStorage — key equality
+    // via availabilityDateKey's rounding, host-TZ independent
+    const targetKey = availabilityDateKey({ date });
 
-    return Array.from(this.userAvailabilityMap.values()).find(ua => {
-      const uaDate = new Date(ua.date);
-      return ua.teamId === teamId &&
-             ua.userId === userId &&
-             uaDate >= startOfDay &&
-             uaDate <= endOfDay;
-    });
+    return Array.from(this.userAvailabilityMap.values()).find(ua =>
+      ua.teamId === teamId &&
+      ua.userId === userId &&
+      availabilityDateKey(ua) === targetKey
+    );
   }
 
   async getUserAvailabilityById(id: string): Promise<UserAvailability | undefined> {
@@ -672,8 +670,9 @@ export class MemoryStorage implements IStorage {
       teamId: data.teamId,
       userId: data.userId,
       date: data.date,
-      startTime: data.startTime,
-      endTime: data.endTime,
+      status: (data.status as UserAvailability["status"]) ?? "available",
+      startTime: data.startTime ?? null,
+      endTime: data.endTime ?? null,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -684,7 +683,7 @@ export class MemoryStorage implements IStorage {
   async updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability> {
     const existing = this.userAvailabilityMap.get(id);
     if (!existing) throw new Error("User availability not found");
-    const updated: UserAvailability = { ...existing, ...data, updatedAt: new Date() };
+    const updated = { ...existing, ...data, updatedAt: new Date() } as UserAvailability;
     this.userAvailabilityMap.set(id, updated);
     return updated;
   }

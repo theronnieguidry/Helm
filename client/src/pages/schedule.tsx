@@ -44,12 +44,19 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import type { Team, GameSession, Availability, TeamMember, AvailabilityStatus, User, UserAvailability, SessionOverride } from "@shared/schema";
+import type { Team, GameSession, TeamMember, User, UserAvailability, SessionOverride } from "@shared/schema";
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay, addMonths, subMonths, isToday } from "date-fns";
-import type { SessionCandidate, AvailabilityType } from "@shared/recurrence";
-import { classifyAvailability, getSessionEndTime, formatDateKey } from "@shared/recurrence";
+import type { SessionCandidate } from "@shared/recurrence";
+import { getTeamTimezone, zonedDateKey } from "@shared/recurrence";
+import { formatInTimeZone } from "date-fns-tz";
+import {
+  availabilityDateKey,
+  candidateDateKey,
+  classifyRowForCandidate,
+  computeAttendance,
+} from "@shared/scheduling";
 import { getTimezoneAbbreviation } from "@/components/timezone-select";
-import AvailabilityPanel from "@/components/availability-panel";
+import AvailabilityPanel, { type AvailabilityResponse } from "@/components/availability-panel";
 import TeamAvailabilityList, { formatTimeWindow, type MemberAvailability } from "@/components/team-availability-list";
 import SessionStatusControl from "@/components/session-status-control";
 import { Separator } from "@/components/ui/separator";
@@ -57,12 +64,6 @@ import { Separator } from "@/components/ui/separator";
 interface SchedulePageProps {
   team: Team;
 }
-
-const AVAILABILITY_OPTIONS: { status: AvailabilityStatus; icon: typeof Check; label: string; color: string }[] = [
-  { status: "available", icon: Check, label: "Available", color: "bg-green-500" },
-  { status: "maybe", icon: HelpCircle, label: "Maybe", color: "bg-yellow-500" },
-  { status: "busy", icon: X, label: "Busy", color: "bg-red-500" },
-];
 
 function formatTimeInUserTimezone(date: Date, userTimezone: string): string {
   try {
@@ -140,17 +141,12 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     enabled: !!team.id,
   });
 
-  const { data: availability } = useQuery<Availability[]>({
-    queryKey: ["/api/teams", team.id, "availability"],
-    enabled: !!team.id,
-  });
-
   const { data: userProfile } = useQuery<User>({
     queryKey: ["/api/user/profile"],
   });
 
   const userTimezone = userProfile?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const teamTimezone = team.timezone || "America/New_York";
+  const teamTimezone = getTeamTimezone(team);
   const timezonesMatch = userTimezone === teamTimezone;
 
   const isDM = members?.find(m => m.userId === user?.id)?.role === "dm";
@@ -173,20 +169,6 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create session", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const updateAvailabilityMutation = useMutation({
-    mutationFn: async ({ sessionId, status }: { sessionId: string; status: AvailabilityStatus }) => {
-      const response = await apiRequest("POST", `/api/teams/${team.id}/sessions/${sessionId}/availability`, { status });
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "availability"] });
-      toast({ title: "Availability updated" });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to update", description: error.message, variant: "destructive" });
     },
   });
 
@@ -241,20 +223,20 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     enabled: !!team.id,
   });
 
-  // User availability mutations (PRD-009)
+  // User availability mutations (PRD-009; stage 2: responses carry a status
+  // and dates travel as plain calendar-date keys, normalized server-side)
   const createUserAvailabilityMutation = useMutation({
-    mutationFn: async ({ date, startTime, endTime }: { date: Date; startTime: string; endTime: string }) => {
-      const response = await apiRequest("POST", `/api/teams/${team.id}/user-availability`, {
-        date: date.toISOString(),
-        startTime,
-        endTime,
+    mutationFn: async ({ dateKey, response }: { dateKey: string; response: AvailabilityResponse }) => {
+      const res = await apiRequest("POST", `/api/teams/${team.id}/user-availability`, {
+        date: dateKey,
+        ...response,
       });
-      return response.json();
+      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "user-availability"] });
       setSelectedAvailabilityDate(null);
-      toast({ title: "Availability saved" });
+      toast({ title: "Response saved" });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to save availability", description: error.message, variant: "destructive" });
@@ -262,17 +244,14 @@ export default function SchedulePage({ team }: SchedulePageProps) {
   });
 
   const updateUserAvailabilityMutation = useMutation({
-    mutationFn: async ({ id, startTime, endTime }: { id: string; startTime: string; endTime: string }) => {
-      const response = await apiRequest("PATCH", `/api/teams/${team.id}/user-availability/${id}`, {
-        startTime,
-        endTime,
-      });
-      return response.json();
+    mutationFn: async ({ id, response }: { id: string; response: AvailabilityResponse }) => {
+      const res = await apiRequest("PATCH", `/api/teams/${team.id}/user-availability/${id}`, response);
+      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "user-availability"] });
       setSelectedAvailabilityDate(null);
-      toast({ title: "Availability updated" });
+      toast({ title: "Response updated" });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to update availability", description: error.message, variant: "destructive" });
@@ -298,100 +277,97 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     return sessions?.filter(s => isSameDay(new Date(s.scheduledAt), day)) || [];
   };
 
-  const getSessionAvailability = (sessionId: string) => {
-    return availability?.filter(a => a.sessionId === sessionId) || [];
+  // Availability rows match by calendar-date key (audit S5): robust across
+  // browser timezones and both storage generations.
+  const getMyResponseForDateKey = (dateKey: string): UserAvailability | undefined => {
+    return userAvailability?.find(
+      ua => ua.userId === user?.id && availabilityDateKey(ua) === dateKey
+    );
   };
 
-  const getMyAvailability = (sessionId: string) => {
-    return availability?.find(a => a.sessionId === sessionId && a.userId === user?.id);
-  };
-
-  // Helper to get user availability for a specific day (PRD-009)
+  // Helper to get user availability for a specific calendar day (PRD-009)
   const getUserAvailabilityForDay = (day: Date): UserAvailability | undefined => {
-    return userAvailability?.find(ua => isSameDay(new Date(ua.date), day) && ua.userId === user?.id);
+    return getMyResponseForDateKey(format(day, "yyyy-MM-dd"));
   };
 
-  // Handle save availability
-  const handleSaveAvailability = (data: { startTime: string; endTime: string }) => {
-    if (!selectedAvailabilityDate) return;
-    const existingAvail = getUserAvailabilityForDay(selectedAvailabilityDate);
-    if (existingAvail) {
-      updateUserAvailabilityMutation.mutate({ id: existingAvail.id, ...data });
+  // Save/delete a response for an arbitrary calendar-date key (used by both
+  // the calendar popover and the manual-session dialog)
+  const saveResponseForDateKey = (dateKey: string, response: AvailabilityResponse) => {
+    const existing = getMyResponseForDateKey(dateKey);
+    if (existing) {
+      updateUserAvailabilityMutation.mutate({ id: existing.id, response });
     } else {
-      createUserAvailabilityMutation.mutate({ date: selectedAvailabilityDate, ...data });
+      createUserAvailabilityMutation.mutate({ dateKey, response });
     }
+  };
+
+  const deleteResponseForDateKey = (dateKey: string) => {
+    const existing = getMyResponseForDateKey(dateKey);
+    if (existing) {
+      deleteUserAvailabilityMutation.mutate(existing.id);
+    }
+  };
+
+  // Handle save availability from the calendar popover
+  const handleSaveAvailability = (data: AvailabilityResponse) => {
+    if (!selectedAvailabilityDate) return;
+    saveResponseForDateKey(format(selectedAvailabilityDate, "yyyy-MM-dd"), data);
   };
 
   // Handle delete availability
   const handleDeleteAvailability = () => {
     if (!selectedAvailabilityDate) return;
-    const existingAvail = getUserAvailabilityForDay(selectedAvailabilityDate);
-    if (existingAvail) {
-      deleteUserAvailabilityMutation.mutate(existingAvail.id);
-    }
+    deleteResponseForDateKey(format(selectedAvailabilityDate, "yyyy-MM-dd"));
   };
 
-  // PRD-010A: Get DM user ID to exclude from attendance count
+  // PRD-010A: Get DM user ID (excluded from attendance count)
   const dmUserId = members?.find(m => m.role === "dm")?.userId;
 
-  // PRD-010A: Get eligible attendees with Full/Partial classification for a session candidate
-  const getEligibleAttendees = (candidate: SessionCandidate): { full: string[]; partial: string[]; total: number } => {
-    const full: string[] = [];
-    const partial: string[] = [];
-
-    if (!userAvailability) return { full, partial, total: 0 };
-
-    const sessionStart = new Date(candidate.scheduledAt);
-    const sessionEnd = new Date(candidate.endsAt);
-    const sessionStartTime = format(sessionStart, "HH:mm");
-    const sessionEndTime = format(sessionEnd, "HH:mm");
-
-    for (const ua of userAvailability) {
-      // Skip DM availability in count
-      if (ua.userId === dmUserId) continue;
-
-      // Check if availability is on the same day
-      if (!isSameDay(new Date(ua.date), sessionStart)) continue;
-
-      const classification = classifyAvailability(
-        ua.startTime,
-        ua.endTime,
-        sessionStartTime,
-        sessionEndTime
-      );
-
-      if (classification === "full") {
-        full.push(ua.userId);
-      } else if (classification === "partial") {
-        partial.push(ua.userId);
-      }
-    }
-
-    return { full, partial, total: full.length + partial.length };
+  // PRD-010A + audit S4: attendance math now comes from shared/scheduling.ts —
+  // the same code the server-side reminder engine runs
+  const getAttendance = (candidate: SessionCandidate) => {
+    return computeAttendance(candidate, members ?? [], userAvailability ?? [], team);
   };
+
+  // A manual session viewed through the candidate lens, so both session kinds
+  // share one availability model (audit S13)
+  const sessionToCandidate = (session: GameSession): SessionCandidate => {
+    const scheduledAt = new Date(session.scheduledAt);
+    const duration = team.defaultSessionDurationMinutes || 180;
+    return {
+      occurrenceKey: zonedDateKey(scheduledAt, teamTimezone),
+      scheduledAt,
+      endsAt: new Date(scheduledAt.getTime() + duration * 60 * 1000),
+      isOverridden: true,
+      status: session.status ?? "scheduled",
+    };
+  };
+
+  // Wall-clock HH:MM of an instant in the TEAM timezone (windows are team-time)
+  const sessionWallTime = (instant: Date): string =>
+    formatInTimeZone(instant, teamTimezone, "HH:mm");
 
   // PRD-010B: Check if DM has availability set for a given date
   const hasDmAvailabilityForDate = (date: Date): boolean => {
     if (!userAvailability || !dmUserId) return false;
+    const dateKey = format(date, "yyyy-MM-dd");
     return userAvailability.some(
-      ua => ua.userId === dmUserId && isSameDay(new Date(ua.date), date)
+      ua => ua.userId === dmUserId && availabilityDateKey(ua) === dateKey
     );
   };
 
-  // Get member availability for a session candidate (for the session availability modal)
+  // Get member availability for a session candidate (for the session availability modal).
+  // Windows are team-timezone times, so they're labeled with the TEAM zone.
   const getSessionMemberAvailability = (candidate: SessionCandidate): MemberAvailability[] => {
     if (!members) return [];
 
-    const sessionStart = new Date(candidate.scheduledAt);
-    const sessionEnd = new Date(candidate.endsAt);
-    const sessionStartTime = format(sessionStart, "HH:mm");
-    const sessionEndTime = format(sessionEnd, "HH:mm");
-    const tzAbbr = getTimezoneAbbreviation(userTimezone);
+    const dateKey = candidateDateKey(candidate, team);
+    const tzAbbr = getTimezoneAbbreviation(teamTimezone);
 
     return members.map((member) => {
       const displayName = `${member.user?.firstName || ""} ${member.user?.lastName || ""}`.trim() || "Unknown";
       const ua = userAvailability?.find(
-        (a) => a.userId === member.userId && isSameDay(new Date(a.date), sessionStart)
+        (a) => a.userId === member.userId && availabilityDateKey(a) === dateKey
       );
 
       if (!ua) {
@@ -404,45 +380,62 @@ export default function SchedulePage({ team }: SchedulePageProps) {
         };
       }
 
-      const classification = classifyAvailability(
-        ua.startTime,
-        ua.endTime,
-        sessionStartTime,
-        sessionEndTime
-      );
+      const classification = classifyRowForCandidate(ua, candidate, team);
+
+      if (classification === "unavailable") {
+        return {
+          userId: member.userId,
+          displayName,
+          profileImageUrl: member.user?.profileImageUrl,
+          status: "unavailable" as const,
+          isDM: member.role === "dm",
+        };
+      }
 
       return {
         userId: member.userId,
         displayName,
         profileImageUrl: member.user?.profileImageUrl,
-        status: classification === "none" ? "no_response" as const : classification,
-        timeWindow:
-          classification !== "none"
-            ? formatTimeWindow(ua.startTime, ua.endTime, tzAbbr)
-            : undefined,
+        // A window that misses the session entirely reads as "can't make it",
+        // with the window shown so the group sees when they ARE around
+        status: classification === "none" ? ("unavailable" as const) : classification,
+        timeWindow: ua.startTime && ua.endTime
+          ? formatTimeWindow(ua.startTime, ua.endTime, tzAbbr)
+          : undefined,
         isDM: member.role === "dm",
       };
     });
   };
 
-  // Get member availability for a calendar date (for the calendar day hover)
+  // Get member availability for a calendar date (for the calendar day hover).
+  // No session window on a bare date — a time window shows as available.
   const getDayMemberAvailability = (day: Date): MemberAvailability[] => {
     if (!members) return [];
 
-    const tzAbbr = getTimezoneAbbreviation(userTimezone);
+    const dateKey = format(day, "yyyy-MM-dd");
+    const tzAbbr = getTimezoneAbbreviation(teamTimezone);
 
     return members.map((member) => {
       const displayName = `${member.user?.firstName || ""} ${member.user?.lastName || ""}`.trim() || "Unknown";
       const ua = userAvailability?.find(
-        (a) => a.userId === member.userId && isSameDay(new Date(a.date), day)
+        (a) => a.userId === member.userId && availabilityDateKey(a) === dateKey
       );
+
+      const status = !ua
+        ? ("no_response" as const)
+        : ua.status === "unavailable"
+        ? ("unavailable" as const)
+        : ("full" as const);
 
       return {
         userId: member.userId,
         displayName,
         profileImageUrl: member.user?.profileImageUrl,
-        status: ua ? "full" as const : "no_response" as const,
-        timeWindow: ua ? formatTimeWindow(ua.startTime, ua.endTime, tzAbbr) : undefined,
+        status,
+        timeWindow:
+          ua && ua.status !== "unavailable" && ua.startTime && ua.endTime
+            ? formatTimeWindow(ua.startTime, ua.endTime, tzAbbr)
+            : undefined,
         isDM: member.role === "dm",
       };
     });
@@ -482,10 +475,11 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     }
   };
 
-  // PRD-014: Check if any team member has availability for a given day
+  // PRD-014: Check if any team member has responded for a given day
   const hasTeamAvailabilityForDay = (day: Date): boolean => {
     if (!userAvailability) return false;
-    return userAvailability.some(ua => isSameDay(new Date(ua.date), day));
+    const dateKey = format(day, "yyyy-MM-dd");
+    return userAvailability.some(ua => availabilityDateKey(ua) === dateKey);
   };
 
   // PRD-010B: Filter and compute upcoming session candidates
@@ -509,9 +503,7 @@ export default function SchedulePage({ team }: SchedulePageProps) {
       // Non-DM members: only scheduled sessions that meet threshold
       if (!isScheduled) return false;
 
-      const eligible = getEligibleAttendees(c);
-      const threshold = team.minAttendanceThreshold || 2;
-      return isFuture && eligible.total >= threshold;
+      return isFuture && getAttendance(c).isEligible;
     })
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
     .slice(0, 5);
@@ -590,7 +582,7 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                   const daySessions = getSessionsForDay(day);
                   const hasSession = daySessions.length > 0;
                   const dayUserAvailability = getUserAvailabilityForDay(day);
-                  const isSelected = selectedAvailabilityDate && isSameDay(day, selectedAvailabilityDate);
+                  const isSelected = !!selectedAvailabilityDate && isSameDay(day, selectedAvailabilityDate);
                   // PRD-013: Get recurrence candidate for the day
                   const dayCandidate = getCandidateForDay(day);
                   const hasCandidateSession = !!dayCandidate;
@@ -624,8 +616,17 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                             <div className="flex items-center gap-1">
                               {dayUserAvailability && (
                                 <div
-                                  className="w-2 h-2 rounded-full bg-primary"
-                                  title="You have availability set"
+                                  className={cn(
+                                    "w-2 h-2 rounded-full",
+                                    dayUserAvailability.status === "unavailable"
+                                      ? "bg-red-500"
+                                      : "bg-primary"
+                                  )}
+                                  title={
+                                    dayUserAvailability.status === "unavailable"
+                                      ? "You marked yourself unavailable"
+                                      : "You have availability set"
+                                  }
                                 />
                               )}
                               {/* PRD-014: Only show info icon when team has availability */}
@@ -747,9 +748,10 @@ export default function SchedulePage({ team }: SchedulePageProps) {
               ) : upcomingCandidates && upcomingCandidates.length > 0 ? (
                 <div className="space-y-3">
                   {upcomingCandidates.map(candidate => {
-                    const eligible = getEligibleAttendees(candidate);
-                    const threshold = team.minAttendanceThreshold || 2;
-                    const hasPartials = eligible.partial.length > 0;
+                    const attendance = getAttendance(candidate);
+                    const threshold = attendance.threshold;
+                    const hasPartials = attendance.partial.length > 0;
+                    const awaitingCount = attendance.noResponse.length;
 
                     const isCanceled = candidate.status === "canceled";
 
@@ -791,9 +793,9 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                               <Badge
                                 variant="outline"
                                 className="text-yellow-600 border-yellow-500/30"
-                                title={`${eligible.partial.length} member(s) have partial availability`}
+                                title={`${attendance.partial.length} member(s) have partial availability`}
                               >
-                                Partial: {eligible.partial.length}
+                                Partial: {attendance.partial.length}
                               </Badge>
                             )}
                             {/* PRD-010B: DM Session Status Toggle */}
@@ -822,13 +824,19 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                         </div>
                         <div className="space-y-1">
                           <div className="flex items-center justify-between text-xs text-muted-foreground">
-                            <span>{eligible.total} available ({eligible.full.length} full, {eligible.partial.length} partial)</span>
+                            <span>{attendance.eligibleCount} available ({attendance.full.length} full, {attendance.partial.length} partial)</span>
                             <span>Need {threshold}</span>
                           </div>
                           <Progress
-                            value={(eligible.total / threshold) * 100}
+                            value={(attendance.eligibleCount / threshold) * 100}
                             className="h-1.5"
                           />
+                          {/* Audit S1: silence and "no" are different — say whose answer is outstanding */}
+                          {!isCanceled && awaitingCount > 0 && (
+                            <p className="text-xs text-muted-foreground">
+                              Awaiting {awaitingCount} response{awaitingCount === 1 ? "" : "s"}
+                            </p>
+                          )}
                         </div>
                       </button>
                     );
@@ -899,80 +907,75 @@ export default function SchedulePage({ team }: SchedulePageProps) {
               {selectedSession && format(new Date(selectedSession.scheduledAt), "h:mm a")}
             </DialogDescription>
           </DialogHeader>
-          {selectedSession && (
-            <div className="space-y-6 py-4">
-              <div>
-                <Label className="mb-3 block">Your Availability</Label>
-                <div className="flex gap-2">
-                  {AVAILABILITY_OPTIONS.map(option => {
-                    const myAvail = getMyAvailability(selectedSession.id);
-                    const isSelected = myAvail?.status === option.status;
-                    return (
-                      <Button
-                        key={option.status}
-                        variant={isSelected ? "default" : "outline"}
-                        className={isSelected ? option.color : ""}
-                        onClick={() => updateAvailabilityMutation.mutate({
-                          sessionId: selectedSession.id,
-                          status: option.status,
-                        })}
-                        disabled={updateAvailabilityMutation.isPending}
-                        data-testid={`avail-${option.status}`}
-                      >
-                        <option.icon className="h-4 w-4 mr-1" />
-                        {option.label}
-                      </Button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div>
-                <Label className="mb-3 block">Team Availability</Label>
-                <div className="space-y-2">
-                  {members?.map(member => {
-                    const memberAvail = availability?.find(
-                      a => a.sessionId === selectedSession.id && a.userId === member.userId
-                    );
-                    return (
-                      <div 
-                        key={member.id}
-                        className="flex items-center justify-between p-2 rounded-md bg-muted/50"
-                      >
-                        <span className="text-sm">
-                          {member.user?.firstName} {member.user?.lastName}
-                          {member.role === "dm" && (
-                            <Badge variant="secondary" className="ml-2 text-xs">DM</Badge>
-                          )}
-                        </span>
-                        {memberAvail ? (
-                          <Badge 
-                            variant="secondary"
-                            className={`${
-                              memberAvail.status === "available" ? "bg-green-500/10 text-green-500" :
-                              memberAvail.status === "maybe" ? "bg-yellow-500/10 text-yellow-500" :
-                              "bg-red-500/10 text-red-500"
-                            }`}
-                          >
-                            {memberAvail.status}
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline">Not set</Badge>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {selectedSession.notes && (
+          {selectedSession && (() => {
+            // Stage 2 (audit S13): manual sessions now use the same date-based
+            // response model as recurrence candidates — the legacy tri-state
+            // table has no remaining writers.
+            const pseudoCandidate = sessionToCandidate(selectedSession);
+            const dateKey = candidateDateKey(pseudoCandidate, team);
+            const myResponse = getMyResponseForDateKey(dateKey);
+            const responsePending =
+              createUserAvailabilityMutation.isPending ||
+              updateUserAvailabilityMutation.isPending ||
+              deleteUserAvailabilityMutation.isPending;
+            return (
+              <div className="space-y-6 py-4">
                 <div>
-                  <Label className="mb-2 block">Notes</Label>
-                  <p className="text-sm text-muted-foreground">{selectedSession.notes}</p>
+                  <Label className="mb-3 block">Your Availability</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      variant={myResponse?.status === "available" ? "default" : "outline"}
+                      className={myResponse?.status === "available" ? "bg-green-500" : ""}
+                      onClick={() =>
+                        saveResponseForDateKey(dateKey, {
+                          status: "available",
+                          startTime: sessionWallTime(pseudoCandidate.scheduledAt),
+                          endTime: sessionWallTime(pseudoCandidate.endsAt),
+                        })
+                      }
+                      disabled={responsePending}
+                      data-testid="avail-available"
+                    >
+                      <Check className="h-4 w-4 mr-1" />
+                      Available
+                    </Button>
+                    <Button
+                      variant={myResponse?.status === "unavailable" ? "default" : "outline"}
+                      className={myResponse?.status === "unavailable" ? "bg-red-500" : ""}
+                      onClick={() => saveResponseForDateKey(dateKey, { status: "unavailable" })}
+                      disabled={responsePending}
+                      data-testid="avail-busy"
+                    >
+                      <X className="h-4 w-4 mr-1" />
+                      Can't make it
+                    </Button>
+                    {myResponse && (
+                      <Button
+                        variant="ghost"
+                        onClick={() => deleteResponseForDateKey(dateKey)}
+                        disabled={responsePending}
+                        data-testid="avail-clear"
+                      >
+                        Clear
+                      </Button>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
-          )}
+
+                <div>
+                  <Label className="mb-3 block">Team Availability</Label>
+                  <TeamAvailabilityList members={getSessionMemberAvailability(pseudoCandidate)} />
+                </div>
+
+                {selectedSession.notes && (
+                  <div>
+                    <Label className="mb-2 block">Notes</Label>
+                    <p className="text-sm text-muted-foreground">{selectedSession.notes}</p>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 

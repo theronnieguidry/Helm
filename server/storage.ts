@@ -21,6 +21,7 @@ import {
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, desc, gte, lte, lt, sql, inArray, count as drizzleCount } from "drizzle-orm";
+import { normalizeAvailabilityDate } from "@shared/scheduling";
 
 import type { User } from "@shared/schema";
 
@@ -583,11 +584,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined> {
-    // Normalize the date to start of day for comparison
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Audit S5: match by intended calendar day, not server-local day bounds.
+    // Normalized rows sit at UTC midnight; legacy rows were written at the
+    // author's browser-local midnight (within ±12h of it) — a ±12h window
+    // around the normalized midnight catches both, mirroring
+    // availabilityDateKey's rounding.
+    const normalized = normalizeAvailabilityDate(date);
+    const windowStart = new Date(normalized.getTime() - 12 * 60 * 60 * 1000);
+    const windowEnd = new Date(normalized.getTime() + 12 * 60 * 60 * 1000 - 1);
 
     const [result] = await db
       .select()
@@ -596,8 +600,8 @@ export class DatabaseStorage implements IStorage {
         and(
           eq(userAvailability.teamId, teamId),
           eq(userAvailability.userId, userId),
-          gte(userAvailability.date, startOfDay),
-          lte(userAvailability.date, endOfDay)
+          gte(userAvailability.date, windowStart),
+          lte(userAvailability.date, windowEnd)
         )
       );
     return result;

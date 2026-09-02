@@ -75,6 +75,16 @@ export function availabilityDateKey(row: Pick<AvailabilityRow, "date">): string 
 }
 
 /**
+ * Normalize any date input the client may send ("2026-01-15", a full ISO
+ * string, a legacy local-midnight instant) to the UTC midnight of the
+ * intended calendar day — the canonical storage form (audit S5/S14).
+ */
+export function normalizeAvailabilityDate(input: string | Date): Date {
+  const parsed = input instanceof Date ? input : new Date(input);
+  return new Date(`${availabilityDateKey({ date: parsed })}T00:00:00Z`);
+}
+
+/**
  * The calendar day a candidate effectively occupies, in the team timezone.
  * For rescheduled occurrences this can differ from the occurrenceKey — a
  * member's availability is about the day the session actually happens.

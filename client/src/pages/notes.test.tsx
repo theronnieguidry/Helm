@@ -122,6 +122,8 @@ const mockTeam = {
   recurrenceAnchorDate: null,
   minAttendanceThreshold: null,
   defaultSessionDurationMinutes: null,
+  aiEnabled: false,
+  aiEnabledAt: null,
 };
 
 const mockNotes = [

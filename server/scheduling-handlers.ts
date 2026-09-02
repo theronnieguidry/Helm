@@ -20,10 +20,13 @@ import type { IStorage } from "./storage";
 import {
   SESSION_STATUSES,
   AVAILABILITY_STATUS,
+  USER_AVAILABILITY_STATUS,
   type SessionStatus,
   type AvailabilityStatus,
+  type UserAvailabilityStatus,
 } from "@shared/schema";
 import { generateSessionCandidates } from "@shared/recurrence";
+import { normalizeAvailabilityDate } from "@shared/scheduling";
 
 type AnyRequest = Request & { user: { claims: { sub: string } } };
 
@@ -211,20 +214,32 @@ export function makeCreateUserAvailabilityHandler(storage: IStorage) {
     try {
       const userId = getUserId(req);
       const { teamId } = req.params;
-      const { date, startTime, endTime } = req.body ?? {};
+      const { date, startTime, endTime, status } = req.body ?? {};
 
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
       }
 
-      // Validate time format (HH:MM)
-      if (!TIME_REGEX.test(startTime) || !TIME_REGEX.test(endTime)) {
-        return res.status(400).json({ message: "Invalid time format. Use HH:MM" });
+      // Stage 2 (audit S1): a response is either an available window or an
+      // explicit "unavailable" — silence stays reserved for "hasn't responded"
+      const responseStatus: UserAvailabilityStatus =
+        status === undefined ? "available" : status;
+      if (!USER_AVAILABILITY_STATUS.includes(responseStatus)) {
+        return res.status(400).json({ message: "Invalid status. Must be 'available' or 'unavailable'" });
       }
 
+      if (responseStatus === "available") {
+        // Validate time format (HH:MM)
+        if (!TIME_REGEX.test(startTime) || !TIME_REGEX.test(endTime)) {
+          return res.status(400).json({ message: "Invalid time format. Use HH:MM" });
+        }
+      }
+
+      const normalizedDate = normalizeAvailabilityDate(date);
+
       // Check for existing availability on this date
-      const existingAvailability = await storage.getUserAvailabilityByDate(teamId, userId, new Date(date));
+      const existingAvailability = await storage.getUserAvailabilityByDate(teamId, userId, normalizedDate);
       if (existingAvailability) {
         return res.status(409).json({ message: "Availability already exists for this date. Use PATCH to update." });
       }
@@ -232,9 +247,10 @@ export function makeCreateUserAvailabilityHandler(storage: IStorage) {
       const availability = await storage.createUserAvailability({
         teamId,
         userId,
-        date: new Date(date),
-        startTime,
-        endTime,
+        date: normalizedDate,
+        status: responseStatus,
+        startTime: responseStatus === "available" ? startTime : null,
+        endTime: responseStatus === "available" ? endTime : null,
       });
 
       res.json(availability);
@@ -273,11 +289,15 @@ export function makeUpdateUserAvailabilityHandler(storage: IStorage) {
     try {
       const userId = getUserId(req);
       const { teamId, id } = req.params;
-      const { startTime, endTime } = req.body ?? {};
+      const { startTime, endTime, status } = req.body ?? {};
 
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (status !== undefined && !USER_AVAILABILITY_STATUS.includes(status)) {
+        return res.status(400).json({ message: "Invalid status. Must be 'available' or 'unavailable'" });
       }
 
       // Validate time format if provided
@@ -291,9 +311,29 @@ export function makeUpdateUserAvailabilityHandler(storage: IStorage) {
       const record = await loadOwnAvailabilityRow(storage, teamId, id, userId, res);
       if (!record) return;
 
-      const updateData: { startTime?: string; endTime?: string } = {};
+      const updateData: {
+        startTime?: string | null;
+        endTime?: string | null;
+        status?: UserAvailabilityStatus;
+      } = {};
       if (startTime) updateData.startTime = startTime;
       if (endTime) updateData.endTime = endTime;
+
+      if (status === "unavailable") {
+        // Flipping to "can't make it" clears the window
+        updateData.status = "unavailable";
+        updateData.startTime = null;
+        updateData.endTime = null;
+      } else if (status === "available") {
+        const effectiveStart = startTime || record.startTime;
+        const effectiveEnd = endTime || record.endTime;
+        if (!effectiveStart || !effectiveEnd) {
+          return res.status(400).json({ message: "startTime and endTime are required when switching to available" });
+        }
+        updateData.status = "available";
+        updateData.startTime = effectiveStart;
+        updateData.endTime = effectiveEnd;
+      }
 
       const availability = await storage.updateUserAvailability(id, updateData);
       res.json(availability);
