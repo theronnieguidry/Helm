@@ -91,6 +91,7 @@ export interface IStorage {
   // User Availability (PRD-009)
   getUserAvailability(teamId: string, startDate: Date, endDate: Date): Promise<UserAvailability[]>;
   getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined>;
+  getUserAvailabilityById(id: string): Promise<UserAvailability | undefined>; // audit S6: ownership checks
   createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability>;
   updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability>;
   deleteUserAvailability(id: string): Promise<void>;
@@ -98,6 +99,7 @@ export interface IStorage {
   // Session Overrides (PRD-010A)
   getSessionOverrides(teamId: string): Promise<SessionOverride[]>;
   getSessionOverride(teamId: string, occurrenceKey: string): Promise<SessionOverride | undefined>;
+  getSessionOverrideById(id: string): Promise<SessionOverride | undefined>; // audit S6: team-scope checks
   upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride>;
   deleteSessionOverride(id: string): Promise<void>;
 
@@ -601,6 +603,14 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async getUserAvailabilityById(id: string): Promise<UserAvailability | undefined> {
+    const [result] = await db
+      .select()
+      .from(userAvailability)
+      .where(eq(userAvailability.id, id));
+    return result;
+  }
+
   async createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability> {
     const [created] = await db.insert(userAvailability).values(data).returning();
     return created;
@@ -638,6 +648,14 @@ export class DatabaseStorage implements IStorage {
           eq(sessionOverrides.occurrenceKey, occurrenceKey)
         )
       );
+    return override;
+  }
+
+  async getSessionOverrideById(id: string): Promise<SessionOverride | undefined> {
+    const [override] = await db
+      .select()
+      .from(sessionOverrides)
+      .where(eq(sessionOverrides.id, id));
     return override;
   }
 

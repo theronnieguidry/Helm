@@ -201,9 +201,11 @@ export class MemoryStorage implements IStorage {
       daysOfMonth: team.daysOfMonth as number[] ?? null,
       startTime: team.startTime ?? null,
       timezone: team.timezone ?? null,
-      recurrenceAnchorDate: null,
-      minAttendanceThreshold: 2,
-      defaultSessionDurationMinutes: 180,
+      // Audit S8: these used to be hardcoded, silently dropping caller values —
+      // which made biweekly recurrence untestable through MemoryStorage
+      recurrenceAnchorDate: team.recurrenceAnchorDate ?? null,
+      minAttendanceThreshold: team.minAttendanceThreshold ?? 2,
+      defaultSessionDurationMinutes: team.defaultSessionDurationMinutes ?? 180,
       // PRD-027: AI Features paywall
       aiEnabled: team.aiEnabled ?? false,
       aiEnabledAt: team.aiEnabledAt ?? null,
@@ -659,6 +661,10 @@ export class MemoryStorage implements IStorage {
     });
   }
 
+  async getUserAvailabilityById(id: string): Promise<UserAvailability | undefined> {
+    return this.userAvailabilityMap.get(id);
+  }
+
   async createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability> {
     const id = generateId();
     const newUserAvailability: UserAvailability = {
@@ -698,6 +704,10 @@ export class MemoryStorage implements IStorage {
     return Array.from(this.sessionOverridesMap.values()).find(
       so => so.teamId === teamId && so.occurrenceKey === occurrenceKey
     );
+  }
+
+  async getSessionOverrideById(id: string): Promise<SessionOverride | undefined> {
+    return this.sessionOverridesMap.get(id);
   }
 
   async upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride> {
