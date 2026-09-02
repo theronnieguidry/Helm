@@ -18,6 +18,20 @@ class MockResizeObserver {
 
 beforeAll(() => {
   vi.stubGlobal('ResizeObserver', MockResizeObserver);
+  // jsdom has no matchMedia; M9's useIsMobile needs it. Desktop by default.
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
 });
 
 afterAll(() => {
@@ -183,6 +197,8 @@ function renderWithProviders(ui: React.ReactElement) {
 describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // M5 draft mirrors persist in localStorage; isolate tests from each other
+    localStorage.clear();
     mockApiRequest.mockResolvedValue({
       json: () => Promise.resolve({ id: 'new-note-id' }),
     });
@@ -489,6 +505,124 @@ describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
           })
         );
       });
+    });
+  });
+
+  // M3 (MVP audit): the Private/Team toggle writes isPrivate
+  describe('Privacy Toggle (M3)', () => {
+    it('shows a Team toggle for an own note and PATCHes isPrivate on click', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
+
+      // note-2 is team-visible, so the toggle reads "Team"
+      const toggle = await screen.findByRole('button', { name: /^team$/i });
+      await user.click(toggle);
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'PATCH',
+          '/api/teams/team-1/notes/note-2',
+          { isPrivate: true }
+        );
+      });
+    });
+  });
+
+  // M8 (MVP audit): search must reveal its matches
+  describe('Search Reveal (M8)', () => {
+    it('force-expands collapsed categories with matches and shows a content snippet', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // People is collapsed by default; 'wizard' matches only the NPC's content
+      expect(screen.queryByText('Gandalf the Grey')).not.toBeInTheDocument();
+
+      await user.type(screen.getByPlaceholderText('Search notes...'), 'wizard');
+
+      expect(await screen.findByText('Gandalf the Grey')).toBeInTheDocument();
+      // The row explains why it matched
+      expect(screen.getByText(/A mysterious wizard/)).toBeInTheDocument();
+    });
+
+    it('shows a global empty state when nothing matches', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.type(
+        screen.getByPlaceholderText('Search notes...'),
+        'zzz-no-such-thing'
+      );
+
+      expect(await screen.findByText(/No matches for/)).toBeInTheDocument();
+    });
+  });
+
+  // M5 (MVP audit): drafts are mirrored locally so a crash can't lose them
+  describe('Draft Mirror (M5)', () => {
+    it('writes the unsaved draft to localStorage as the user types', async () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const contentInput = screen.getByLabelText('Session Notes');
+      fireEvent.change(contentInput, { target: { value: 'Backed up locally' } });
+
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      await waitFor(() => {
+        const raw = localStorage.getItem(`note-draft:team-1:today:${todayStr}`);
+        expect(raw).toBeTruthy();
+        expect(JSON.parse(raw!).content).toBe('Backed up locally');
+      });
+    });
+
+    it('restores a lingering today-draft after a reload', async () => {
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      localStorage.setItem(
+        `note-draft:team-1:today:${todayStr}`,
+        JSON.stringify({ title: todayStr, content: 'Recovered text', savedAt: Date.now() })
+      );
+
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const contentInput = (await screen.findByLabelText(
+        'Session Notes'
+      )) as HTMLTextAreaElement;
+      await waitFor(() => {
+        expect(contentInput.value).toBe('Recovered text');
+      });
+    });
+  });
+
+  // M9 (MVP audit): single-pane flow below the mobile breakpoint
+  describe('Mobile Single-Pane (M9)', () => {
+    it('renders the editor with a Back button instead of split panels', async () => {
+      const originalWidth = window.innerWidth;
+      Object.defineProperty(window, 'innerWidth', {
+        writable: true,
+        configurable: true,
+        value: 500,
+      });
+      const user = userEvent.setup();
+      try {
+        renderWithProviders(<NotesPage team={mockTeam} />);
+
+        // Capture-first: the Today editor is the initial pane
+        const backButton = await screen.findByRole('button', { name: /all notes/i });
+        expect(screen.queryByTestId('resizable-panel-group')).not.toBeInTheDocument();
+        expect(screen.getByLabelText('Session Notes')).toBeInTheDocument();
+
+        // Back reaches the list pane
+        await user.click(backButton);
+        expect(await screen.findByPlaceholderText('Search notes...')).toBeInTheDocument();
+        expect(screen.queryByLabelText('Session Notes')).not.toBeInTheDocument();
+      } finally {
+        Object.defineProperty(window, 'innerWidth', {
+          writable: true,
+          configurable: true,
+          value: originalWidth,
+        });
+      }
     });
   });
 

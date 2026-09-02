@@ -227,9 +227,9 @@ export const notes = pgTable("notes", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => [
-  // PRD-023: enforce one session log per team per calendar day
+  // PRD-023 (revised for MVP audit M1): enforce one session log per author per team per calendar day
   uniqueIndex("notes_unique_session_per_day")
-    .on(table.teamId, sql`DATE(${table.sessionDate})`)
+    .on(table.teamId, table.authorId, sql`DATE(${table.sessionDate})`)
     .where(sql`${table.noteType} = 'session_log'`),
 ]);
 

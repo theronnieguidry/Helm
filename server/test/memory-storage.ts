@@ -408,8 +408,8 @@ export class MemoryStorage implements IStorage {
       });
   }
 
-  // PRD-019: Find session by date for today's session editor
-  async findSessionByDate(teamId: string, date: Date): Promise<Note | undefined> {
+  // PRD-019: Find session by date for today's session editor (M1: scoped per author)
+  async findSessionByDate(teamId: string, date: Date, authorId: string): Promise<Note | undefined> {
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(date);
@@ -417,6 +417,7 @@ export class MemoryStorage implements IStorage {
 
     return Array.from(this.notes.values()).find(
       n => n.teamId === teamId &&
+        n.authorId === authorId &&
         n.noteType === "session_log" &&
         n.sessionDate &&
         n.sessionDate >= startOfDay &&
@@ -603,8 +604,10 @@ export class MemoryStorage implements IStorage {
       ...backlink,
       ...data,
       evidenceType: data.evidenceType ? validateEvidenceType(data.evidenceType) : backlink.evidenceType,
-      startOffset: data.startOffset ?? backlink.startOffset,
-      endOffset: data.endOffset ?? backlink.endOffset,
+      // M7: an explicit null clears offsets (orphaned backlink) — mirror the
+      // DB storage, which sets whatever the caller passed.
+      startOffset: "startOffset" in data ? data.startOffset ?? null : backlink.startOffset,
+      endOffset: "endOffset" in data ? data.endOffset ?? null : backlink.endOffset,
       confidence: data.confidence ?? backlink.confidence,
     } as Backlink;
     this.backlinks.set(id, updated);

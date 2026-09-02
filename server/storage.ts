@@ -56,8 +56,8 @@ export interface IStorage {
   updateNote(id: string, data: Partial<InsertNote>): Promise<Note>;
   deleteNote(id: string): Promise<void>;
   getSessionLogs(teamId: string): Promise<Note[]>;
-  // PRD-019: Find session by date for today's session editor
-  findSessionByDate(teamId: string, date: Date): Promise<Note | undefined>;
+  // PRD-019: Find session by date for today's session editor (M1: scoped per author)
+  findSessionByDate(teamId: string, date: Date, authorId: string): Promise<Note | undefined>;
   // PRD-015: Import methods
   findNoteBySourceId(teamId: string, sourceSystem: string, sourcePageId: string): Promise<Note | undefined>;
   upsertImportedNote(note: InsertNote): Promise<{ note: Note; created: boolean }>;
@@ -366,8 +366,8 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(notes.sessionDate));
   }
 
-  // PRD-019: Find session by date for today's session editor
-  async findSessionByDate(teamId: string, date: Date): Promise<Note | undefined> {
+  // PRD-019: Find session by date for today's session editor (M1: scoped per author)
+  async findSessionByDate(teamId: string, date: Date, authorId: string): Promise<Note | undefined> {
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(date);
@@ -379,6 +379,7 @@ export class DatabaseStorage implements IStorage {
       .where(
         and(
           eq(notes.teamId, teamId),
+          eq(notes.authorId, authorId),
           eq(notes.noteType, "session_log"),
           gte(notes.sessionDate, startOfDay),
           lte(notes.sessionDate, endOfDay)

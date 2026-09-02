@@ -33,6 +33,7 @@ import {
   X,
   ArrowRight,
   MoreHorizontal,
+  Lock,
 } from "lucide-react";
 import type { Note, NoteType, QuestStatus, Team } from "@shared/schema";
 import { QUEST_STATUSES, QUEST_STATUS_LABELS, QUEST_STATUS_COLORS } from "@shared/schema";
@@ -144,11 +145,26 @@ interface NeedsReviewItem {
   explanation: string | null;
 }
 
+// M8: show why a row matched a content search — a small context window
+// around the first occurrence of the query.
+function matchSnippet(content: string | null | undefined, query: string): string | null {
+  if (!content) return null;
+  const idx = content.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return null;
+  const start = Math.max(0, idx - 30);
+  const end = Math.min(content.length, idx + query.length + 50);
+  const slice = content.slice(start, end).replace(/\s+/g, " ").trim();
+  return `${start > 0 ? "…" : ""}${slice}${end < content.length ? "…" : ""}`;
+}
+
 interface NotesLeftPanelProps {
   notes: Note[];
   team: Team;
   selectedNoteId: string | null;
   isTodayMode: boolean;
+  // M13: authorId → display name for session rows
+  authorNames?: Record<string, string>;
+  currentUserId?: string;
   onSelectNote: (note: Note) => void;
   onSelectTodaySession: () => void;
   needsReviewItems?: NeedsReviewItem[];
@@ -164,6 +180,8 @@ export function NotesLeftPanel({
   team,
   selectedNoteId,
   isTodayMode,
+  authorNames,
+  currentUserId,
   onSelectNote,
   onSelectTodaySession,
   needsReviewItems,
@@ -216,6 +234,27 @@ export function NotesLeftPanel({
   }, [notes, searchQuery]);
 
   const todayStr = format(new Date(), "yyyy-MM-dd");
+
+  // M8: search must reveal its own results — while a query is active, every
+  // category with matches is force-expanded (only Sessions is open by default,
+  // so matches elsewhere used to hide behind collapsed headers).
+  const trimmedQuery = searchQuery.trim();
+  const isSearching = trimmedQuery !== "";
+  const matchedCategoryKeys = useMemo(
+    () =>
+      FILTER_CATEGORIES.filter(
+        (c) => (notesByCategory[c.key]?.length ?? 0) > 0
+      ).map((c) => c.key),
+    [notesByCategory]
+  );
+  const totalMatches = useMemo(
+    () =>
+      FILTER_CATEGORIES.reduce(
+        (sum, c) => sum + (notesByCategory[c.key]?.length ?? 0),
+        0
+      ),
+    [notesByCategory]
+  );
 
   return (
     <div className="flex flex-col h-full bg-muted/30">
@@ -428,9 +467,15 @@ export function NotesLeftPanel({
             )}
           </div>
         )}
+        {/* M8: global empty state so "no results" is stated, not implied */}
+        {isSearching && totalMatches === 0 && (
+          <p className="text-sm text-muted-foreground text-center py-8 px-4">
+            No matches for "{trimmedQuery}"
+          </p>
+        )}
         <Accordion
           type="multiple"
-          value={expandedSections}
+          value={isSearching ? matchedCategoryKeys : expandedSections}
           onValueChange={setExpandedSections}
           className="px-2"
         >
@@ -512,6 +557,13 @@ export function NotesLeftPanel({
                                 </span>
                               ) : null}
                               <span className="truncate">{note.title}</span>
+                              {/* M3: private notes are visibly marked */}
+                              {note.isPrivate && (
+                                <Lock
+                                  className="h-3 w-3 text-muted-foreground flex-shrink-0"
+                                  aria-label="Private note"
+                                />
+                              )}
                               {/* P2-1 (PRD-004 FR-5): quest lifecycle at a glance */}
                               {note.noteType === "quest" && (
                                 <Badge
@@ -532,6 +584,30 @@ export function NotesLeftPanel({
                                 />
                               )}
                             </div>
+                            {/* M13: per-author sessions need a visible author */}
+                            {note.noteType === "session_log" &&
+                              note.authorId !== currentUserId &&
+                              authorNames?.[note.authorId] && (
+                                <div className="text-xs text-muted-foreground truncate">
+                                  by {authorNames[note.authorId]}
+                                </div>
+                              )}
+                            {/* M8: show why a content match surfaced this row */}
+                            {isSearching &&
+                              !note.title
+                                .toLowerCase()
+                                .includes(trimmedQuery.toLowerCase()) &&
+                              (() => {
+                                const snippet = matchSnippet(
+                                  note.content,
+                                  trimmedQuery
+                                );
+                                return snippet ? (
+                                  <div className="text-xs text-muted-foreground truncate">
+                                    {snippet}
+                                  </div>
+                                ) : null;
+                              })()}
                           </button>
                         </NotesItemPreview>
                       ))}

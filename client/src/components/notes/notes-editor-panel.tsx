@@ -25,6 +25,7 @@ import {
 import { useAutosave, type SaveStatus } from "@/hooks/use-autosave";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { ToastAction } from "@/components/ui/toast";
 import {
   Check,
   Loader2,
@@ -37,6 +38,8 @@ import {
   ScrollText,
   FileText,
   BookOpen,
+  Lock,
+  Globe,
 } from "lucide-react";
 import type { Note, NoteType, Team, QuestStatus } from "@shared/schema";
 import { QUEST_STATUSES, QUEST_STATUS_LABELS } from "@shared/schema";
@@ -83,6 +86,7 @@ interface NotesEditorPanelProps {
   isTodayMode: boolean;
   memberAiEnabled: boolean; // PRD-028
   memberRole?: string; // PRD-048: role-gates relationship deletion
+  authorNames?: Record<string, string>; // M13: authorId → display name
   onNoteCreated: (note: Note) => void;
   onNoteDeleted: (noteId: string) => void;
   onOpenNote?: (noteId: string, highlight?: { start: number; end: number }) => void;
@@ -99,6 +103,7 @@ export function NotesEditorPanel({
   isTodayMode,
   memberAiEnabled,
   memberRole,
+  authorNames,
   onNoteCreated,
   onNoteDeleted,
   onOpenNote,
@@ -171,8 +176,20 @@ export function NotesEditorPanel({
     prevNoteRef.current = activeNote ?? null;
 
     if (activeNote) {
+      const serverContent = activeNote.content || "";
+      const drafts = draftsRef.current;
+      // M4 (MVP audit): the null → id transition happens when the lazy-create
+      // POST resolves mid-typing. The server snapshot is what the POST carried,
+      // which is already behind the textarea — resetting to it would truncate
+      // the first sentence. Keep the live draft and push it up instead.
+      const preserveDraft =
+        prev === null &&
+        isTodayMode &&
+        activeNote.noteType === "session_log" &&
+        drafts.content.trim() !== "" &&
+        drafts.content !== serverContent;
+
       setDraftTitle(activeNote.title);
-      setDraftContent(activeNote.content || "");
       setDraftQuestStatus(activeNote.questStatus || "lead");
       setDraftSessionDate(
         activeNote.sessionDate
@@ -180,12 +197,75 @@ export function NotesEditorPanel({
           : ""
       );
       setHasCreatedToday(true);
+
+      if (preserveDraft) {
+        apiRequest("PATCH", `/api/teams/${team.id}/notes/${activeNote.id}`, {
+          content: drafts.content,
+        })
+          .then(() => {
+            queryClient.invalidateQueries({
+              queryKey: ["/api/teams", team.id, "notes"],
+            });
+          })
+          .catch(() => {
+            // Autosave keeps retrying with the same draft; nothing lost.
+          });
+      } else {
+        // M5: a localStorage mirror newer than the server copy means the last
+        // session ended (crash, closed laptop) before a save landed — restore it.
+        let restoredContent: string | null = null;
+        try {
+          const raw = localStorage.getItem(`note-draft:${team.id}:${activeNote.id}`);
+          if (raw) {
+            const mirror = JSON.parse(raw) as { content?: unknown; savedAt?: unknown };
+            const serverUpdated = activeNote.updatedAt
+              ? new Date(activeNote.updatedAt).getTime()
+              : 0;
+            if (
+              typeof mirror.content === "string" &&
+              mirror.content !== serverContent &&
+              typeof mirror.savedAt === "number" &&
+              mirror.savedAt > serverUpdated
+            ) {
+              restoredContent = mirror.content;
+            }
+          }
+        } catch {
+          // localStorage unavailable — nothing to restore
+        }
+        setDraftContent(restoredContent ?? serverContent);
+        if (restoredContent !== null) {
+          toast({
+            title: "Unsaved draft restored",
+            description: "Text from your last visit was recovered and will be saved.",
+          });
+        }
+      }
     } else if (isTodayMode) {
       setDraftTitle(todayStr);
-      setDraftContent("");
       setDraftQuestStatus("lead");
       setDraftSessionDate("");
       setHasCreatedToday(false);
+      // M5: recover a today-draft that never got its session created
+      let restoredContent = "";
+      try {
+        const raw = localStorage.getItem(`note-draft:${team.id}:today:${todayStr}`);
+        if (raw) {
+          const mirror = JSON.parse(raw) as { content?: unknown };
+          if (typeof mirror.content === "string" && mirror.content.trim() !== "") {
+            restoredContent = mirror.content;
+          }
+        }
+      } catch {
+        // localStorage unavailable
+      }
+      setDraftContent(restoredContent);
+      if (restoredContent) {
+        toast({
+          title: "Unsaved draft restored",
+          description: "Text from your last visit was recovered and will be saved.",
+        });
+      }
     }
     setIsEditingImported(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -229,10 +309,46 @@ export function NotesEditorPanel({
     },
     onSuccess: (note) => {
       setHasCreatedToday(true);
+      // M5: the pre-create draft mirror is superseded by the note's own key
+      try {
+        localStorage.removeItem(`note-draft:${team.id}:today:${todayStr}`);
+      } catch {
+        // ignore
+      }
       onNoteCreated(note);
       queryClient.invalidateQueries({
         queryKey: ["/api/teams", team.id, "notes"],
       });
+    },
+  });
+
+  // M3 (MVP audit): the Private/Team toggle — without it the server-side
+  // privacy enforcement guards a flag nobody can set.
+  const togglePrivacyMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeNote) return null;
+      const response = await apiRequest(
+        "PATCH",
+        `/api/teams/${team.id}/notes/${activeNote.id}`,
+        { isPrivate: !activeNote.isPrivate }
+      );
+      return response.json();
+    },
+    onSuccess: (note) => {
+      queryClient.invalidateQueries({
+        queryKey: ["/api/teams", team.id, "notes"],
+      });
+      if (note) {
+        toast({
+          title: note.isPrivate ? "Note is now private" : "Note is now shared",
+          description: note.isPrivate
+            ? "Only you (and the DM) can see it."
+            : "Everyone on the team can see it.",
+        });
+      }
+    },
+    onError: () => {
+      toast({ title: "Failed to change visibility", variant: "destructive" });
     },
   });
 
@@ -270,6 +386,12 @@ export function NotesEditorPanel({
     onSuccess: () => {
       if (activeNote) {
         onNoteDeleted(activeNote.id);
+        // M5: don't let the mirror resurrect a deliberately deleted note
+        try {
+          localStorage.removeItem(`note-draft:${team.id}:${activeNote.id}`);
+        } catch {
+          // ignore
+        }
       }
       setDraftContent("");
       setDraftTitle(todayStr);
@@ -315,6 +437,11 @@ export function NotesEditorPanel({
           `/api/teams/${team.id}/notes/${activeNote.id}`
         );
         setHasCreatedToday(false);
+        try {
+          localStorage.removeItem(`note-draft:${team.id}:${activeNote.id}`);
+        } catch {
+          // ignore
+        }
         onNoteDeleted(activeNote.id);
         queryClient.invalidateQueries({
           queryKey: ["/api/teams", team.id, "notes"],
@@ -345,13 +472,82 @@ export function NotesEditorPanel({
   );
 
   // Autosave hook
-  const { status: autosaveStatus } = useAutosave({
+  const { status: autosaveStatus, save: retrySave } = useAutosave({
     data: { title: draftTitle, content: draftContent, questStatus: draftQuestStatus },
     onSave: handleAutosave,
     debounceMs: 750,
     maxWaitMs: 10000,
     enabled: isTodayMode || !!activeNote,
   });
+
+  // M5: local draft mirror. Every keystroke lands in localStorage so a wifi
+  // drop + closed laptop can't lose an evening of notes; cleared once the
+  // server confirms the save.
+  const draftStorageKey = activeNote
+    ? `note-draft:${team.id}:${activeNote.id}`
+    : `note-draft:${team.id}:today:${todayStr}`;
+
+  useEffect(() => {
+    if (!isTodayMode && !activeNote) return;
+    const serverContent = activeNote?.content || "";
+    const serverTitle = activeNote?.title ?? draftTitle;
+    if (draftContent === serverContent && draftTitle === serverTitle) return;
+    try {
+      localStorage.setItem(
+        draftStorageKey,
+        JSON.stringify({ title: draftTitle, content: draftContent, savedAt: Date.now() })
+      );
+    } catch {
+      // Quota/private mode — the server autosave path still applies
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftTitle, draftContent, draftStorageKey]);
+
+  useEffect(() => {
+    if (autosaveStatus !== "saved") return;
+    try {
+      localStorage.removeItem(draftStorageKey);
+    } catch {
+      // ignore
+    }
+  }, [autosaveStatus, draftStorageKey]);
+
+  // M5: warn before closing the tab while a save is pending or failed
+  useEffect(() => {
+    if (
+      autosaveStatus !== "pending" &&
+      autosaveStatus !== "saving" &&
+      autosaveStatus !== "error"
+    ) {
+      return;
+    }
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [autosaveStatus]);
+
+  // M5: surface save failures loudly, with a retry — the grey indicator alone
+  // is invisible at the table.
+  const prevSaveStatusRef = useRef<SaveStatus>("idle");
+  useEffect(() => {
+    if (autosaveStatus === "error" && prevSaveStatusRef.current !== "error") {
+      toast({
+        title: "Autosave failed",
+        description:
+          "Your text is kept safe in this browser and will not be lost. Check your connection and retry.",
+        variant: "destructive",
+        action: (
+          <ToastAction altText="Retry save" onClick={() => retrySave()}>
+            Retry
+          </ToastAction>
+        ),
+      });
+    }
+    prevSaveStatusRef.current = autosaveStatus;
+  }, [autosaveStatus, toast, retrySave]);
 
   // Handle delete
   const handleDelete = () => {
@@ -415,6 +611,16 @@ export function NotesEditorPanel({
                   {NOTE_TYPE_LABELS[activeNote.noteType]}
                 </Badge>
                 <h2 className="font-semibold text-lg">{activeNote.title}</h2>
+                {/* M13: sessions are per-author — say whose log this is */}
+                {activeNote.noteType === "session_log" &&
+                  authorNames?.[activeNote.authorId] && (
+                    <span className="text-sm text-muted-foreground">
+                      by{" "}
+                      {activeNote.authorId === userId
+                        ? "you"
+                        : authorNames[activeNote.authorId]}
+                    </span>
+                  )}
               </div>
             </>
           ) : (
@@ -427,6 +633,34 @@ export function NotesEditorPanel({
         <div className="flex items-center gap-3">
           {/* Autosave status */}
           <SaveStatusIndicator status={autosaveStatus} />
+
+          {/* M3: Private/Team visibility toggle (author or DM only) */}
+          {activeNote && (activeNote.authorId === userId || memberRole === "dm") && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              onClick={() => togglePrivacyMutation.mutate()}
+              disabled={togglePrivacyMutation.isPending}
+              title={
+                activeNote.isPrivate
+                  ? "Only you (and the DM) can see this note. Click to share it with the team."
+                  : "Visible to the whole team. Click to make it private."
+              }
+            >
+              {activeNote.isPrivate ? (
+                <>
+                  <Lock className="h-3.5 w-3.5" />
+                  Private
+                </>
+              ) : (
+                <>
+                  <Globe className="h-3.5 w-3.5" />
+                  Team
+                </>
+              )}
+            </Button>
+          )}
 
           {/* Delete button */}
           {activeNote && (

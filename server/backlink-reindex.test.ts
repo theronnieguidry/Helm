@@ -60,7 +60,7 @@ describe("reindexBacklinksForSource", () => {
     const newContent = "Early on, we met Kettle at the tavern.";
     const result = await reindexBacklinksForSource(storage, sessionId, newContent);
 
-    expect(result).toEqual({ refreshed: 1, rebuilt: 0, removed: 0 });
+    expect(result).toEqual({ refreshed: 1, rebuilt: 0, orphaned: 0 });
     const updated = (await storage.getOutgoingLinks(sessionId)).find((b) => b.id === backlink.id);
     expect(updated!.startOffset).toBe(newContent.indexOf("met Kettle at the tavern"));
   });
@@ -71,14 +71,14 @@ describe("reindexBacklinksForSource", () => {
     const newContent = "The party greeted Kettle warmly before departing.";
     const result = await reindexBacklinksForSource(storage, sessionId, newContent);
 
-    expect(result).toEqual({ refreshed: 0, rebuilt: 1, removed: 0 });
+    expect(result).toEqual({ refreshed: 0, rebuilt: 1, orphaned: 0 });
     const updated = (await storage.getOutgoingLinks(sessionId))[0];
     expect(updated.textSnippet).toContain("Kettle");
     expect(updated.startOffset).toBe(newContent.toLowerCase().indexOf("kettle"));
   });
 
-  it("removes the backlink when the mention no longer exists", async () => {
-    await addBacklink("met Kettle at the tavern", 3, 27);
+  it("orphans (keeps) the backlink when the mention is currently absent (M7)", async () => {
+    const backlink = await addBacklink("met Kettle at the tavern", 3, 27);
 
     const result = await reindexBacklinksForSource(
       storage,
@@ -86,12 +86,34 @@ describe("reindexBacklinksForSource", () => {
       "Nothing relevant happened today."
     );
 
-    expect(result).toEqual({ refreshed: 0, rebuilt: 0, removed: 1 });
-    expect(await storage.getOutgoingLinks(sessionId)).toHaveLength(0);
+    expect(result).toEqual({ refreshed: 0, rebuilt: 0, orphaned: 1 });
+    const links = await storage.getOutgoingLinks(sessionId);
+    expect(links).toHaveLength(1);
+    expect(links[0].id).toBe(backlink.id);
+    expect(links[0].startOffset).toBeNull();
+    expect(links[0].endOffset).toBeNull();
+    // Evidence snippet is preserved so the link can re-anchor later
+    expect(links[0].textSnippet).toBe("met Kettle at the tavern");
+  });
+
+  it("re-anchors an orphaned backlink when the text returns (M7)", async () => {
+    const backlink = await addBacklink("met Kettle at the tavern", 3, 27);
+
+    // Simulate a cut... (mention transiently gone)
+    await reindexBacklinksForSource(storage, sessionId, "Nothing here yet.");
+    // ...and re-paste
+    const restored = "So anyway, we met Kettle at the tavern again.";
+    const result = await reindexBacklinksForSource(storage, sessionId, restored);
+
+    expect(result).toEqual({ refreshed: 1, rebuilt: 0, orphaned: 0 });
+    const links = await storage.getOutgoingLinks(sessionId);
+    expect(links).toHaveLength(1);
+    expect(links[0].id).toBe(backlink.id);
+    expect(links[0].startOffset).toBe(restored.indexOf("met Kettle at the tavern"));
   });
 
   it("is a no-op for notes without outgoing backlinks", async () => {
     const result = await reindexBacklinksForSource(storage, entityId, "whatever");
-    expect(result).toEqual({ refreshed: 0, rebuilt: 0, removed: 0 });
+    expect(result).toEqual({ refreshed: 0, rebuilt: 0, orphaned: 0 });
   });
 });

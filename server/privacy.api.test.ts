@@ -244,10 +244,10 @@ describe("Privacy enforcement (P0-1)", () => {
     });
   });
 
-  describe("POST /api/teams/:teamId/notes idempotent session path (F9)", () => {
+  describe("POST /api/teams/:teamId/notes idempotent session path (F9 → M1 per-user)", () => {
     const today = new Date().toISOString();
 
-    it("returns 409 without leaking content when another author's private session exists for the date", async () => {
+    it("lets another member create their OWN session even when a private one exists for the date (M1)", async () => {
       const privateSession = await createPrivateNote({
         title: "Session 12 (DM eyes only)",
         content: "Players are about to be betrayed",
@@ -258,16 +258,14 @@ describe("Privacy enforcement (P0-1)", () => {
       const res = await request(otherApp)
         .post(`/api/teams/${team.id}/notes`)
         .send({ title: "Session 12", noteType: "session_log", sessionDate: today })
-        .expect(409);
+        .expect(200);
 
-      expect(res.body.message).toBe("A private session already exists for this date");
+      // A distinct per-author session — and no leak of the other author's content
+      expect(res.body.id).not.toBe(privateSession.id);
       expect(JSON.stringify(res.body)).not.toContain("betrayed");
-      expect(res.body.id).toBeUndefined();
 
-      // No duplicate session was created
       const sessions = (await storage.getNotes(team.id)).filter((n) => n.noteType === "session_log");
-      expect(sessions).toHaveLength(1);
-      expect(sessions[0].id).toBe(privateSession.id);
+      expect(sessions).toHaveLength(2);
     });
 
     it("returns the existing private session to its own author (200)", async () => {
@@ -285,7 +283,7 @@ describe("Privacy enforcement (P0-1)", () => {
       expect(res.body.id).toBe(privateSession.id);
     });
 
-    it("returns the existing private session to the DM (200, DM sees all)", async () => {
+    it("gives the DM their own session rather than a member's existing one (M1)", async () => {
       const privateSession = await createPrivateNote({
         title: "Session 12 (DM eyes only)",
         noteType: "session_log",
@@ -297,10 +295,10 @@ describe("Privacy enforcement (P0-1)", () => {
         .send({ title: "Session 12", noteType: "session_log", sessionDate: today })
         .expect(200);
 
-      expect(res.body.id).toBe(privateSession.id);
+      expect(res.body.id).not.toBe(privateSession.id);
     });
 
-    it("still returns an existing public session to any member (200)", async () => {
+    it("creates a distinct session per member even when a public one exists (M1)", async () => {
       const publicSession = await createPrivateNote({
         title: "Session 12",
         noteType: "session_log",
@@ -313,7 +311,7 @@ describe("Privacy enforcement (P0-1)", () => {
         .send({ title: "Session 12", noteType: "session_log", sessionDate: today })
         .expect(200);
 
-      expect(res.body.id).toBe(publicSession.id);
+      expect(res.body.id).not.toBe(publicSession.id);
     });
   });
 });

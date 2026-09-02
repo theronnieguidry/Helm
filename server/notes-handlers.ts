@@ -10,7 +10,7 @@
 import type { Request, Response } from "express";
 import type { IStorage } from "./storage";
 import type { QuestStatus } from "@shared/schema";
-import { canViewNote, filterVisibleNotes } from "./note-visibility";
+import { filterVisibleNotes } from "./note-visibility";
 import { reindexBacklinksForSource } from "./backlink-reindex";
 
 type AnyRequest = Request & { user: { claims: { sub: string } } };
@@ -51,11 +51,9 @@ export function makeTodaySessionHandler(storage: IStorage) {
         return res.status(403).json({ message: "Not a team member" });
       }
 
-      const todaySession = await storage.findSessionByDate(teamId, new Date());
-      // Privacy: today's session may be another author's private note
-      if (todaySession && !canViewNote(todaySession, userId, member.role)) {
-        return res.json(null);
-      }
+      // M1: today's session is the *requesting user's* session — each member
+      // keeps their own log, so nobody edits into another author's 403 wall.
+      const todaySession = await storage.findSessionByDate(teamId, new Date(), userId);
       res.json(todaySession ?? null);
     } catch (error) {
       console.error("Error fetching today's session:", error);
@@ -103,14 +101,12 @@ export function makeCreateNoteHandler(storage: IStorage) {
         return res.status(403).json({ message: "Not a team member" });
       }
 
-      // For session_log type, check if one already exists for the given date (idempotency)
+      // For session_log type, check if the author already has one for the given
+      // date (idempotency). M1: scoped per author — another member's session for
+      // the same day never blocks or leaks into this user's create.
       if (noteType === "session_log" && sessionDate) {
-        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
+        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate), userId);
         if (existing) {
-          // P0-1 (F9): don't leak another author's private session content
-          if (!canViewNote(existing, userId, member.role)) {
-            return res.status(409).json({ message: "A private session already exists for this date" });
-          }
           // Return existing session instead of creating duplicate
           return res.status(200).json(existing);
         }
@@ -184,11 +180,24 @@ export function makeUpdateNoteHandler(storage: IStorage) {
         updateData.reviewedAt = body.reviewedAt ? new Date(body.reviewedAt) : null;
       }
 
+      const contentChanged =
+        "content" in body &&
+        typeof body.content === "string" &&
+        body.content !== (existingNote.content ?? "");
+
+      // M6: the imported-note view renders contentMarkdownResolved over content,
+      // so an edit to an imported note must carry into the resolved markdown or
+      // the edit silently disappears behind the stale render.
+      if (contentChanged && existingNote.sourceSystem) {
+        updateData.contentMarkdownResolved = body.content;
+      }
+
       const note = await storage.updateNote(noteId, updateData);
 
-      // P2-2 (F34, PRD-005 FR-4): content edits re-index or remove backlinks
-      // sourced from this note so evidence never goes stale.
-      if ("content" in body && typeof body.content === "string") {
+      // P2-2 (F34, PRD-005 FR-4): content edits re-index backlinks sourced from
+      // this note so evidence never goes stale. M7: skipped when content is
+      // unchanged — no reason to churn offsets on title/status-only saves.
+      if (contentChanged) {
         await reindexBacklinksForSource(storage, noteId, body.content).catch((err) => {
           console.error("Backlink re-index failed:", err);
         });

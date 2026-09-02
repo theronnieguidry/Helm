@@ -9,8 +9,9 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable";
-import { Upload } from "lucide-react";
+import { Upload, ChevronLeft } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { NotesLeftPanel } from "@/components/notes/notes-left-panel";
 import { NotesEditorPanel } from "@/components/notes/notes-editor-panel";
 import { NuclinoImportDialog } from "@/components/nuclino-import-dialog";
@@ -21,12 +22,26 @@ interface NotesPageProps {
   team: Team;
 }
 
+// The members endpoint attaches user profile fields for display (M13)
+type MemberWithUser = TeamMember & {
+  user?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    profileImageUrl?: string | null;
+    email?: string | null;
+  };
+};
+
 export default function NotesPage({ team }: NotesPageProps) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const isMobile = useIsMobile();
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isTodayMode, setIsTodayMode] = useState(true);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  // M9: below md the two panels become a single-pane list ⇄ editor flow.
+  // Capture-first: the page opens on the Today editor, Back reaches the list.
+  const [mobileView, setMobileView] = useState<"list" | "editor">("editor");
 
   // Gap F47 (PRD-015 FR-4): honor /notes/:id deep links (imported wiki links,
   // browser history) by selecting the target note instead of ignoring the param.
@@ -36,6 +51,7 @@ export default function NotesPage({ team }: NotesPageProps) {
     if (routeNoteId) {
       setSelectedNoteId(routeNoteId);
       setIsTodayMode(false);
+      setMobileView("editor");
     }
   }, [routeNoteId]);
 
@@ -61,12 +77,24 @@ export default function NotesPage({ team }: NotesPageProps) {
   });
 
   // PRD-028: Get team members to check AI enabled status
-  const { data: members } = useQuery<TeamMember[]>({
+  const { data: members } = useQuery<MemberWithUser[]>({
     queryKey: ["/api/teams", team.id, "members"],
     enabled: !!team.id,
   });
 
   const currentMember = members?.find(m => m.userId === user?.id);
+
+  // M13: authorId → display name, so session rows/header can say whose log it is
+  const authorNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const m of members ?? []) {
+      map[m.userId] =
+        [m.user?.firstName, m.user?.lastName].filter(Boolean).join(" ") ||
+        m.user?.email ||
+        "Member";
+    }
+    return map;
+  }, [members]);
 
   // PRD-038: Mutation for approving/rejecting classifications
   const updateClassification = useMutation({
@@ -110,7 +138,8 @@ export default function NotesPage({ team }: NotesPageProps) {
     );
   }, [notes, user?.id]);
 
-  // Find today's session
+  // Find today's session. M1: sessions are per-author — only the current
+  // user's own log may pre-fill the Today editor, never a teammate's.
   const todaySession = useMemo(() => {
     if (!visibleNotes) return null;
     const today = new Date();
@@ -118,11 +147,12 @@ export default function NotesPage({ team }: NotesPageProps) {
       visibleNotes.find(
         (note) =>
           note.noteType === "session_log" &&
+          note.authorId === user?.id &&
           note.sessionDate &&
           isSameDay(new Date(note.sessionDate), today)
       ) || null
     );
-  }, [visibleNotes]);
+  }, [visibleNotes, user?.id]);
 
   // Get selected note
   const selectedNote = useMemo(() => {
@@ -133,11 +163,13 @@ export default function NotesPage({ team }: NotesPageProps) {
   const handleSelectNote = (note: Note) => {
     setSelectedNoteId(note.id);
     setIsTodayMode(false);
+    setMobileView("editor");
   };
 
   const handleSelectTodaySession = () => {
     setSelectedNoteId(null);
     setIsTodayMode(true);
+    setMobileView("editor");
   };
 
   const handleNoteCreated = (note: Note) => {
@@ -168,6 +200,7 @@ export default function NotesPage({ team }: NotesPageProps) {
   ) => {
     setSelectedNoteId(noteId);
     setIsTodayMode(false);
+    setMobileView("editor");
     setPendingHighlight(highlight ? { noteId, ...highlight } : null);
   };
 
@@ -204,51 +237,106 @@ export default function NotesPage({ team }: NotesPageProps) {
         </Button>
       </div>
 
-      {/* Two-panel layout */}
-      <ResizablePanelGroup
-        direction="horizontal"
-        className="flex-1"
-      >
-        <ResizablePanel
-          defaultSize={33}
-          minSize={25}
-          maxSize={45}
-          className="min-w-[250px]"
+      {/* Layout: resizable two-panel on desktop, single-pane flow on mobile (M9) */}
+      {isMobile ? (
+        <div className="flex-1 min-h-0 flex flex-col">
+          {mobileView === "list" ? (
+            <NotesLeftPanel
+              notes={visibleNotes}
+              team={team}
+              selectedNoteId={selectedNoteId}
+              isTodayMode={isTodayMode}
+              authorNames={authorNames}
+              currentUserId={user?.id}
+              onSelectNote={handleSelectNote}
+              onSelectTodaySession={handleSelectTodaySession}
+              needsReviewItems={needsReviewData?.items}
+              onApproveReview={handleApproveReview}
+              onRejectReview={handleRejectReview}
+              onReclassifyReview={handleReclassifyReview}
+              isReviewActionPending={updateClassification.isPending}
+            />
+          ) : (
+            <>
+              <div className="border-b px-2 py-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setMobileView("list")}
+                >
+                  <ChevronLeft className="h-4 w-4 mr-1" />
+                  All notes
+                </Button>
+              </div>
+              <div className="flex-1 min-h-0">
+                <NotesEditorPanel
+                  team={team}
+                  userId={user?.id || ""}
+                  selectedNote={selectedNote}
+                  todaySession={todaySession}
+                  isTodayMode={isTodayMode}
+                  memberAiEnabled={currentMember?.aiEnabled ?? false}
+                  memberRole={currentMember?.role}
+                  authorNames={authorNames}
+                  onNoteCreated={handleNoteCreated}
+                  onNoteDeleted={handleNoteDeleted}
+                  onOpenNote={handleOpenNote}
+                  pendingHighlight={pendingHighlight}
+                  onHighlightConsumed={() => setPendingHighlight(null)}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      ) : (
+        <ResizablePanelGroup
+          direction="horizontal"
+          className="flex-1"
         >
-          <NotesLeftPanel
-            notes={visibleNotes}
-            team={team}
-            selectedNoteId={selectedNoteId}
-            isTodayMode={isTodayMode}
-            onSelectNote={handleSelectNote}
-            onSelectTodaySession={handleSelectTodaySession}
-            needsReviewItems={needsReviewData?.items}
-            onApproveReview={handleApproveReview}
-            onRejectReview={handleRejectReview}
-            onReclassifyReview={handleReclassifyReview}
-            isReviewActionPending={updateClassification.isPending}
-          />
-        </ResizablePanel>
+          <ResizablePanel
+            defaultSize={33}
+            minSize={25}
+            maxSize={45}
+            className="min-w-[250px]"
+          >
+            <NotesLeftPanel
+              notes={visibleNotes}
+              team={team}
+              selectedNoteId={selectedNoteId}
+              isTodayMode={isTodayMode}
+              authorNames={authorNames}
+              currentUserId={user?.id}
+              onSelectNote={handleSelectNote}
+              onSelectTodaySession={handleSelectTodaySession}
+              needsReviewItems={needsReviewData?.items}
+              onApproveReview={handleApproveReview}
+              onRejectReview={handleRejectReview}
+              onReclassifyReview={handleReclassifyReview}
+              isReviewActionPending={updateClassification.isPending}
+            />
+          </ResizablePanel>
 
-        <ResizableHandle withHandle />
+          <ResizableHandle withHandle />
 
-        <ResizablePanel defaultSize={67} minSize={50}>
-          <NotesEditorPanel
-            team={team}
-            userId={user?.id || ""}
-            selectedNote={selectedNote}
-            todaySession={todaySession}
-            isTodayMode={isTodayMode}
-            memberAiEnabled={currentMember?.aiEnabled ?? false}
-            memberRole={currentMember?.role}
-            onNoteCreated={handleNoteCreated}
-            onNoteDeleted={handleNoteDeleted}
-            onOpenNote={handleOpenNote}
-            pendingHighlight={pendingHighlight}
-            onHighlightConsumed={() => setPendingHighlight(null)}
-          />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+          <ResizablePanel defaultSize={67} minSize={50}>
+            <NotesEditorPanel
+              team={team}
+              userId={user?.id || ""}
+              selectedNote={selectedNote}
+              todaySession={todaySession}
+              isTodayMode={isTodayMode}
+              memberAiEnabled={currentMember?.aiEnabled ?? false}
+              memberRole={currentMember?.role}
+              authorNames={authorNames}
+              onNoteCreated={handleNoteCreated}
+              onNoteDeleted={handleNoteDeleted}
+              onOpenNote={handleOpenNote}
+              pendingHighlight={pendingHighlight}
+              onHighlightConsumed={() => setPendingHighlight(null)}
+            />
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      )}
 
       {/* Import Dialog */}
       <NuclinoImportDialog

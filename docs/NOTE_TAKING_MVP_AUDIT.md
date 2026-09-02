@@ -16,6 +16,27 @@ MVP-blocking claim below was verified against the actual code with file:line evi
 `D#` = its design section, `N#`/`S#` = the product/server auditors' internal numbering,
 mapped into M-numbers below.
 
+> **UPDATE (2026-09-02): all 9 MVP blockers (M1–M9, plus M13) are implemented** on
+> `claude/note-taking-completion-49gfvg`, 719 tests green.
+> - **M1/M2/M13**: sessions are now per-author — `notes_unique_session_per_day` scoped to
+>   `(teamId, authorId, DATE(sessionDate))`, `findSessionByDate` takes an `authorId`,
+>   today-session + idempotent create resolve the *requesting user's* log, the client
+>   Today memo filters by author, and session rows/header show the author.
+> - **M3**: Private/Team toggle in the editor header (author or DM), lock icon on rows.
+> - **M4**: the null→id sync transition preserves the live draft and PATCHes it up
+>   instead of resetting to the POST snapshot.
+> - **M5**: localStorage draft mirror per note (restored when newer than the server
+>   copy), `beforeunload` guard while unsaved, destructive toast with Retry on failure.
+> - **M6**: content edits on `sourceSystem` notes also update `contentMarkdownResolved`.
+> - **M7**: re-index branch 3 soft-orphans (nulls offsets, keeps the snippet for
+>   re-anchoring) instead of deleting; re-index skipped when content is unchanged.
+> - **M8**: active search force-expands matching categories, shows content-match
+>   snippets on rows, and renders a global "No matches" state.
+> - **M9**: below 768px the notes page is a single-pane list ⇄ editor flow (Today
+>   editor first, Back button to the list).
+>
+> §3's M10–M12 privacy stragglers and the rest of the MVP-relevant list remain open.
+
 ---
 
 ## 1. Verdict

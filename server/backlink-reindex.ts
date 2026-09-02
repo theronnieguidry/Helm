@@ -9,8 +9,11 @@
  *     refreshed to its new position.
  *  2. Otherwise, if the target note's title still occurs, the snippet is
  *     rebuilt from a window around the first occurrence.
- *  3. Otherwise the mention is gone from the note, so the backlink is removed
- *     ("backlinks always reflect current state — no stale references").
+ *  3. Otherwise the mention is currently absent, so the backlink is orphaned:
+ *     offsets are nulled but the snippet is KEPT. Autosave runs this every
+ *     750ms, so "absent" is often transient (cut-to-repaste, mid-edit states);
+ *     deleting would permanently destroy user-confirmed Link evidence (M7).
+ *     If the text returns, branch 1 re-anchors from the preserved snippet.
  */
 import type { IStorage } from "./storage";
 
@@ -27,7 +30,7 @@ function windowAround(content: string, index: number, matchLength: number): stri
 export interface ReindexResult {
   refreshed: number;
   rebuilt: number;
-  removed: number;
+  orphaned: number;
 }
 
 export async function reindexBacklinksForSource(
@@ -35,7 +38,7 @@ export async function reindexBacklinksForSource(
   sourceNoteId: string,
   newContent: string,
 ): Promise<ReindexResult> {
-  const result: ReindexResult = { refreshed: 0, rebuilt: 0, removed: 0 };
+  const result: ReindexResult = { refreshed: 0, rebuilt: 0, orphaned: 0 };
   const outgoing = await storage.getOutgoingLinks(sourceNoteId);
   if (outgoing.length === 0) return result;
 
@@ -73,9 +76,16 @@ export async function reindexBacklinksForSource(
       }
     }
 
-    // 3. Mention no longer exists in the note: remove the stale backlink.
-    await storage.deleteBacklink(backlink.id);
-    result.removed++;
+    // 3. Mention currently absent: orphan (null offsets, keep snippet) so a
+    // transient edit state never destroys evidence; skip the write if the
+    // backlink is already orphaned.
+    if (backlink.startOffset !== null || backlink.endOffset !== null) {
+      await storage.updateBacklink(backlink.id, {
+        startOffset: null,
+        endOffset: null,
+      });
+    }
+    result.orphaned++;
   }
 
   return result;
