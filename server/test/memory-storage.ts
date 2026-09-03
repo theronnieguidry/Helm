@@ -12,6 +12,8 @@ import {
   type Backlink, type InsertBacklink,
   type UserAvailability, type InsertUserAvailability,
   type SessionOverride, type InsertSessionOverride,
+  type PushSubscription, type InsertPushSubscription,
+  type Notification, type InsertNotification,
   type ImportRun, type InsertImportRun, type ImportRunStatus,
   type NoteImportSnapshot, type InsertNoteImportSnapshot,
   type ImportRunOptions, type ImportRunStats,
@@ -284,6 +286,10 @@ export class MemoryStorage implements IStorage {
       // PRD-028: Per-member AI features
       aiEnabled: member.aiEnabled ?? false,
       aiEnabledAt: member.aiEnabledAt ?? null,
+      // Stage 3: notification preferences default on
+      notifyAvailabilityReminders: member.notifyAvailabilityReminders ?? true,
+      notifyGroupAwaiting: member.notifyGroupAwaiting ?? true,
+      notifyGameDay: member.notifyGameDay ?? true,
       joinedAt: new Date(),
     };
     this.teamMembers.set(id, newMember);
@@ -742,6 +748,116 @@ export class MemoryStorage implements IStorage {
 
   async deleteSessionOverride(id: string): Promise<void> {
     this.sessionOverridesMap.delete(id);
+  }
+
+  // Push Subscriptions + Notifications (scheduling audit stage 3)
+  private pushSubscriptionsMap: Map<string, PushSubscription> = new Map();
+  private notificationsMap: Map<string, Notification> = new Map();
+
+  async upsertPushSubscription(data: InsertPushSubscription): Promise<PushSubscription> {
+    const existing = Array.from(this.pushSubscriptionsMap.values()).find(
+      s => s.endpoint === data.endpoint
+    );
+    if (existing) {
+      const updated: PushSubscription = {
+        ...existing,
+        userId: data.userId,
+        p256dh: data.p256dh,
+        auth: data.auth,
+        userAgent: data.userAgent ?? existing.userAgent,
+        lastSeenAt: new Date(),
+      };
+      this.pushSubscriptionsMap.set(existing.id, updated);
+      return updated;
+    }
+    const id = generateId();
+    const created: PushSubscription = {
+      id,
+      userId: data.userId,
+      endpoint: data.endpoint,
+      p256dh: data.p256dh,
+      auth: data.auth,
+      userAgent: data.userAgent ?? null,
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+    };
+    this.pushSubscriptionsMap.set(id, created);
+    return created;
+  }
+
+  async getPushSubscriptionsForUser(userId: string): Promise<PushSubscription[]> {
+    return Array.from(this.pushSubscriptionsMap.values()).filter(s => s.userId === userId);
+  }
+
+  async deletePushSubscriptionByEndpoint(endpoint: string): Promise<void> {
+    for (const [id, sub] of Array.from(this.pushSubscriptionsMap.entries())) {
+      if (sub.endpoint === endpoint) this.pushSubscriptionsMap.delete(id);
+    }
+  }
+
+  async createNotification(data: InsertNotification): Promise<Notification> {
+    // Mirror the DB unique constraint on dedupeKey
+    const dupe = await this.getNotificationByDedupeKey(data.dedupeKey);
+    if (dupe) throw new Error(`duplicate key value violates unique constraint: ${data.dedupeKey}`);
+    const id = generateId();
+    const created: Notification = {
+      id,
+      userId: data.userId,
+      teamId: data.teamId,
+      type: data.type as Notification["type"],
+      occurrenceKey: data.occurrenceKey ?? null,
+      stage: data.stage ?? null,
+      dedupeKey: data.dedupeKey,
+      title: data.title,
+      body: data.body,
+      url: data.url ?? null,
+      pushSent: data.pushSent ?? false,
+      readAt: data.readAt ?? null,
+      createdAt: new Date(),
+    };
+    this.notificationsMap.set(id, created);
+    return created;
+  }
+
+  async getNotificationByDedupeKey(dedupeKey: string): Promise<Notification | undefined> {
+    return Array.from(this.notificationsMap.values()).find(n => n.dedupeKey === dedupeKey);
+  }
+
+  async getNotificationsForUser(userId: string, limit = 50): Promise<Notification[]> {
+    return Array.from(this.notificationsMap.values())
+      .filter(n => n.userId === userId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
+
+  async markNotificationsRead(userId: string, ids?: string[]): Promise<void> {
+    for (const [id, n] of Array.from(this.notificationsMap.entries())) {
+      if (n.userId !== userId) continue;
+      if (ids && ids.length > 0 && !ids.includes(id)) continue;
+      this.notificationsMap.set(id, { ...n, readAt: new Date() });
+    }
+  }
+
+  async updateNotificationPushSent(id: string, pushSent: boolean): Promise<void> {
+    const n = this.notificationsMap.get(id);
+    if (n) this.notificationsMap.set(id, { ...n, pushSent });
+  }
+
+  async updateMemberNotificationPrefs(
+    memberId: string,
+    prefs: { notifyAvailabilityReminders?: boolean; notifyGroupAwaiting?: boolean; notifyGameDay?: boolean }
+  ): Promise<TeamMember> {
+    const member = this.teamMembers.get(memberId);
+    if (!member) throw new Error("Team member not found");
+    const updated = { ...member, ...prefs };
+    this.teamMembers.set(memberId, updated);
+    return updated;
+  }
+
+  async listTeamsWithRecurrence(): Promise<Team[]> {
+    return Array.from(this.teams.values()).filter(
+      t => t.recurrenceFrequency != null && t.startTime != null
+    );
   }
 
   // Import Runs (PRD-015A)

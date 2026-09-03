@@ -9,6 +9,8 @@ import {
   backlinks, Backlink, InsertBacklink,
   userAvailability, UserAvailability, InsertUserAvailability,
   sessionOverrides, SessionOverride, InsertSessionOverride,
+  pushSubscriptions, PushSubscription, InsertPushSubscription,
+  notifications, Notification, InsertNotification,
   importRuns, ImportRun, InsertImportRun, ImportRunStatus,
   noteImportSnapshots, NoteImportSnapshot, InsertNoteImportSnapshot,
   // PRD-016: AI Enrichment
@@ -103,6 +105,22 @@ export interface IStorage {
   getSessionOverrideById(id: string): Promise<SessionOverride | undefined>; // audit S6: team-scope checks
   upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride>;
   deleteSessionOverride(id: string): Promise<void>;
+
+  // Push Subscriptions + Notifications (scheduling audit stage 3)
+  upsertPushSubscription(data: InsertPushSubscription): Promise<PushSubscription>;
+  getPushSubscriptionsForUser(userId: string): Promise<PushSubscription[]>;
+  deletePushSubscriptionByEndpoint(endpoint: string): Promise<void>;
+  createNotification(data: InsertNotification): Promise<Notification>;
+  getNotificationByDedupeKey(dedupeKey: string): Promise<Notification | undefined>;
+  getNotificationsForUser(userId: string, limit?: number): Promise<Notification[]>;
+  markNotificationsRead(userId: string, ids?: string[]): Promise<void>;
+  updateNotificationPushSent(id: string, pushSent: boolean): Promise<void>;
+  updateMemberNotificationPrefs(
+    memberId: string,
+    prefs: { notifyAvailabilityReminders?: boolean; notifyGroupAwaiting?: boolean; notifyGameDay?: boolean }
+  ): Promise<TeamMember>;
+  // Stage 4: the reminder engine sweeps every team that has a recurrence
+  listTeamsWithRecurrence(): Promise<Team[]>;
 
   // Import Runs (PRD-015A)
   getImportRuns(teamId: string): Promise<ImportRun[]>;
@@ -687,6 +705,95 @@ export class DatabaseStorage implements IStorage {
 
   async deleteSessionOverride(id: string): Promise<void> {
     await db.delete(sessionOverrides).where(eq(sessionOverrides.id, id));
+  }
+
+  // Push Subscriptions + Notifications (scheduling audit stage 3)
+  async upsertPushSubscription(data: InsertPushSubscription): Promise<PushSubscription> {
+    const [existing] = await db
+      .select()
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.endpoint, data.endpoint));
+
+    if (existing) {
+      const [updated] = await db
+        .update(pushSubscriptions)
+        .set({
+          userId: data.userId,
+          p256dh: data.p256dh,
+          auth: data.auth,
+          userAgent: data.userAgent ?? existing.userAgent,
+          lastSeenAt: new Date(),
+        })
+        .where(eq(pushSubscriptions.id, existing.id))
+        .returning();
+      return updated;
+    }
+
+    const [created] = await db.insert(pushSubscriptions).values(data).returning();
+    return created;
+  }
+
+  async getPushSubscriptionsForUser(userId: string): Promise<PushSubscription[]> {
+    return await db
+      .select()
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.userId, userId));
+  }
+
+  async deletePushSubscriptionByEndpoint(endpoint: string): Promise<void> {
+    await db.delete(pushSubscriptions).where(eq(pushSubscriptions.endpoint, endpoint));
+  }
+
+  async createNotification(data: InsertNotification): Promise<Notification> {
+    const [created] = await db.insert(notifications).values(data).returning();
+    return created;
+  }
+
+  async getNotificationByDedupeKey(dedupeKey: string): Promise<Notification | undefined> {
+    const [result] = await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.dedupeKey, dedupeKey));
+    return result;
+  }
+
+  async getNotificationsForUser(userId: string, limit = 50): Promise<Notification[]> {
+    return await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.userId, userId))
+      .orderBy(desc(notifications.createdAt))
+      .limit(limit);
+  }
+
+  async markNotificationsRead(userId: string, ids?: string[]): Promise<void> {
+    const conditions = ids && ids.length > 0
+      ? and(eq(notifications.userId, userId), inArray(notifications.id, ids))
+      : eq(notifications.userId, userId);
+    await db.update(notifications).set({ readAt: new Date() }).where(conditions);
+  }
+
+  async updateNotificationPushSent(id: string, pushSent: boolean): Promise<void> {
+    await db.update(notifications).set({ pushSent }).where(eq(notifications.id, id));
+  }
+
+  async updateMemberNotificationPrefs(
+    memberId: string,
+    prefs: { notifyAvailabilityReminders?: boolean; notifyGroupAwaiting?: boolean; notifyGameDay?: boolean }
+  ): Promise<TeamMember> {
+    const [updated] = await db
+      .update(teamMembers)
+      .set(prefs)
+      .where(eq(teamMembers.id, memberId))
+      .returning();
+    return updated;
+  }
+
+  async listTeamsWithRecurrence(): Promise<Team[]> {
+    return await db
+      .select()
+      .from(teams)
+      .where(sql`${teams.recurrenceFrequency} IS NOT NULL AND ${teams.startTime} IS NOT NULL`);
   }
 
   // Import Runs (PRD-015A)

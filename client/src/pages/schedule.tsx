@@ -56,6 +56,8 @@ import {
   computeAttendance,
 } from "@shared/scheduling";
 import { getTimezoneAbbreviation } from "@/components/timezone-select";
+import { ToastAction } from "@/components/ui/toast";
+import { enablePushNotifications, getNotificationPermission } from "@/lib/push";
 import AvailabilityPanel, { type AvailabilityResponse } from "@/components/availability-panel";
 import TeamAvailabilityList, { formatTimeWindow, type MemberAvailability } from "@/components/team-availability-list";
 import SessionStatusControl from "@/components/session-status-control";
@@ -236,7 +238,30 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/teams", team.id, "user-availability"] });
       setSelectedAvailabilityDate(null);
-      toast({ title: "Response saved" });
+      // Stage 3: contextual permission ask — right after the member engages
+      // with availability, never on page load
+      if (getNotificationPermission() === "default") {
+        toast({
+          title: "Response saved",
+          description: "Want a reminder when the group needs your answer?",
+          action: (
+            <ToastAction
+              altText="Enable notifications"
+              onClick={() => {
+                enablePushNotifications().then((result) => {
+                  if (result === "subscribed") {
+                    toast({ title: "Notifications enabled on this device" });
+                  }
+                });
+              }}
+            >
+              Enable
+            </ToastAction>
+          ),
+        });
+      } else {
+        toast({ title: "Response saved" });
+      }
     },
     onError: (error: Error) => {
       toast({ title: "Failed to save availability", description: error.message, variant: "destructive" });

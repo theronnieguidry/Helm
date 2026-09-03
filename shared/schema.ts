@@ -127,6 +127,10 @@ export const teamMembers = pgTable("team_members", {
   // PRD-028: Per-member AI features toggle
   aiEnabled: boolean("ai_enabled").default(false).notNull(),
   aiEnabledAt: timestamp("ai_enabled_at"),
+  // Scheduling audit stage 3: per-member, per-team notification preferences
+  notifyAvailabilityReminders: boolean("notify_availability_reminders").default(true).notNull(),
+  notifyGroupAwaiting: boolean("notify_group_awaiting").default(true).notNull(),
+  notifyGameDay: boolean("notify_game_day").default(true).notNull(),
   joinedAt: timestamp("joined_at").defaultNow(),
 });
 
@@ -306,6 +310,52 @@ export const backlinks = pgTable("backlinks", {
   endOffset: integer("end_offset"),
   evidenceType: text("evidence_type").notNull().$type<EvidenceType>().default("Mention"),
   confidence: real("confidence").default(0.8),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Push Subscriptions (scheduling audit stage 3): one row per browser/device
+// that granted notification permission. Endpoint is globally unique per the
+// Web Push spec.
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  endpoint: text("endpoint").notNull().unique(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at").defaultNow(),
+  lastSeenAt: timestamp("last_seen_at").defaultNow(),
+});
+
+// Notification types the reminder engine and event triggers emit
+export const NOTIFICATION_TYPES = [
+  "availability_reminder",   // to a non-respondent: "are you in for Saturday?"
+  "group_awaiting",          // digest to responders: "still waiting on Alice, Bob"
+  "session_confirmed",       // everyone answered / threshold locked in
+  "threshold_unreachable",   // to the DM: session mathematically dead
+  "game_day",                // noon-of-session: "game is on today at 7"
+  "session_canceled",        // DM canceled an occurrence
+  "session_rescheduled",     // DM moved an occurrence
+] as const;
+export type NotificationType = typeof NOTIFICATION_TYPES[number];
+
+// Notifications (scheduling audit stage 3): one row per delivered notification
+// per target user. Doubles as the in-app feed AND the engine's idempotency
+// ledger — dedupeKey is unique, so a re-run (or catch-up after downtime) can
+// never double-send.
+export const notifications = pgTable("notifications", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(), // target
+  teamId: varchar("team_id").notNull(),
+  type: text("type").notNull().$type<NotificationType>(),
+  occurrenceKey: varchar("occurrence_key"), // session occurrence, when applicable
+  stage: varchar("stage"), // e.g. "t7" | "t3" | "t1" | "day0"
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  url: text("url"), // in-app deep link
+  pushSent: boolean("push_sent").default(false).notNull(),
+  readAt: timestamp("read_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -568,6 +618,8 @@ export const insertDiceRollSchema = createInsertSchema(diceRolls).omit({ id: tru
 export const insertBacklinkSchema = createInsertSchema(backlinks).omit({ id: true, createdAt: true });
 export const insertUserAvailabilitySchema = createInsertSchema(userAvailability).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertSessionOverrideSchema = createInsertSchema(sessionOverrides).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertPushSubscriptionSchema = createInsertSchema(pushSubscriptions).omit({ id: true, createdAt: true, lastSeenAt: true });
+export const insertNotificationSchema = createInsertSchema(notifications).omit({ id: true, createdAt: true });
 export const insertImportRunSchema = createInsertSchema(importRuns).omit({ id: true, createdAt: true });
 export const insertNoteImportSnapshotSchema = createInsertSchema(noteImportSnapshots).omit({ id: true, createdAt: true });
 // PRD-016: Enrichment insert schemas
@@ -599,6 +651,10 @@ export type UserAvailability = typeof userAvailability.$inferSelect;
 export type InsertUserAvailability = z.infer<typeof insertUserAvailabilitySchema>;
 export type SessionOverride = typeof sessionOverrides.$inferSelect;
 export type InsertSessionOverride = z.infer<typeof insertSessionOverrideSchema>;
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+export type InsertPushSubscription = z.infer<typeof insertPushSubscriptionSchema>;
+export type Notification = typeof notifications.$inferSelect;
+export type InsertNotification = z.infer<typeof insertNotificationSchema>;
 export type ImportRun = typeof importRuns.$inferSelect;
 export type InsertImportRun = z.infer<typeof insertImportRunSchema>;
 export type NoteImportSnapshot = typeof noteImportSnapshots.$inferSelect;

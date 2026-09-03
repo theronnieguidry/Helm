@@ -77,6 +77,14 @@ import {
   makeGetSessionOverridesHandler,
   makeDeleteSessionOverrideHandler,
 } from "./scheduling-handlers";
+import {
+  makePushPublicKeyHandler,
+  makeSavePushSubscriptionHandler,
+  makeDeletePushSubscriptionHandler,
+  makeListNotificationsHandler,
+  makeMarkNotificationsReadHandler,
+  makeUpdateNotificationPrefsHandler,
+} from "./notification-handlers";
 
 // PRD-050 FR-3: explicit Nuclino links are high-confidence evidence.
 const NUCLINO_LINK_EVIDENCE_CONFIDENCE = 0.9;
@@ -2882,6 +2890,14 @@ export async function registerRoutes(
   app.post("/api/teams/:teamId/session-overrides", isAuthenticated, makeUpsertSessionOverrideHandler(storage));
   app.get("/api/teams/:teamId/session-overrides", isAuthenticated, makeGetSessionOverridesHandler(storage));
   app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, makeDeleteSessionOverrideHandler(storage));
+
+  // Push + notifications (scheduling audit stage 3)
+  app.get("/api/push/public-key", isAuthenticated, makePushPublicKeyHandler());
+  app.post("/api/push/subscriptions", isAuthenticated, makeSavePushSubscriptionHandler(storage));
+  app.delete("/api/push/subscriptions", isAuthenticated, makeDeletePushSubscriptionHandler(storage));
+  app.get("/api/notifications", isAuthenticated, makeListNotificationsHandler(storage));
+  app.post("/api/notifications/mark-read", isAuthenticated, makeMarkNotificationsReadHandler(storage));
+  app.patch("/api/teams/:teamId/members/me/notification-prefs", isAuthenticated, makeUpdateNotificationPrefsHandler(storage));
 
   // PRD-043: AI Cache management is handled via CLI script (scripts/ai-cache-admin.ts)
   // NOT exposed over HTTP for security reasons in published app

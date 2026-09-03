@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import NotificationSettingsCard from "@/components/notification-settings-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -382,6 +383,9 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
               </div>
             </CardContent>
           </Card>
+
+          {/* Scheduling audit stage 3: session reminders + push */}
+          <NotificationSettingsCard team={team} currentMember={currentMember} />
         </div>
       </div>
     );
@@ -660,6 +664,9 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
             </div>
           </CardContent>
         </Card>
+
+        {/* Scheduling audit stage 3: session reminders + push */}
+        <NotificationSettingsCard team={team} currentMember={currentMember} />
 
         <div className="flex items-center justify-between pt-4">
           <Button
