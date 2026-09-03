@@ -2899,6 +2899,28 @@ export async function registerRoutes(
   app.post("/api/notifications/mark-read", isAuthenticated, makeMarkNotificationsReadHandler(storage));
   app.patch("/api/teams/:teamId/members/me/notification-prefs", isAuthenticated, makeUpdateNotificationPrefsHandler(storage));
 
+  // Scheduling audit stage 4: external-cron hook for hosts whose process
+  // sleeps (autoscale). Guarded by a shared-secret header; 404 when unset so
+  // the route is invisible unless deliberately configured. The sweep is
+  // idempotent, so overlapping triggers are harmless.
+  app.post("/api/jobs/reminder-sweep", async (req, res) => {
+    const token = process.env.REMINDER_CRON_TOKEN;
+    if (!token) {
+      return res.status(404).json({ message: "Not found" });
+    }
+    if (req.headers["x-cron-token"] !== token) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const { runReminderSweep } = await import("./jobs/reminder-engine");
+      const summary = await runReminderSweep(storage);
+      res.json(summary);
+    } catch (error) {
+      console.error("Manual reminder sweep failed:", error);
+      res.status(500).json({ message: "Sweep failed" });
+    }
+  });
+
   // PRD-043: AI Cache management is handled via CLI script (scripts/ai-cache-admin.ts)
   // NOT exposed over HTTP for security reasons in published app
 

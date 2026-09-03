@@ -27,6 +27,7 @@ import {
 } from "@shared/schema";
 import { generateSessionCandidates } from "@shared/recurrence";
 import { normalizeAvailabilityDate } from "@shared/scheduling";
+import { runEventChecksForTeam, notifyOccurrenceChanged } from "./jobs/reminder-engine";
 
 type AnyRequest = Request & { user: { claims: { sub: string } } };
 
@@ -253,6 +254,10 @@ export function makeCreateUserAvailabilityHandler(storage: IStorage) {
         endTime: responseStatus === "available" ? endTime : null,
       });
 
+      // Stage 4: "everyone's in" should land the moment the last answer
+      // arrives — dedupe-guarded, so this is cheap and safe
+      await runEventChecksForTeam(storage, teamId).catch(() => {});
+
       res.json(availability);
     } catch (error) {
       console.error("Error creating user availability:", error);
@@ -336,6 +341,10 @@ export function makeUpdateUserAvailabilityHandler(storage: IStorage) {
       }
 
       const availability = await storage.updateUserAvailability(id, updateData);
+
+      // Stage 4: a flipped answer can confirm a session or kill it
+      await runEventChecksForTeam(storage, teamId).catch(() => {});
+
       res.json(availability);
     } catch (error) {
       console.error("Error updating user availability:", error);
@@ -426,6 +435,7 @@ export function makeUpsertSessionOverrideHandler(storage: IStorage) {
         return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
       }
 
+      const prior = await storage.getSessionOverride(teamId, occurrenceKey);
       const override = await storage.upsertSessionOverride({
         teamId,
         occurrenceKey,
@@ -433,6 +443,30 @@ export function makeUpsertSessionOverrideHandler(storage: IStorage) {
         scheduledAtOverride: scheduledAtOverride ? new Date(scheduledAtOverride) : null,
         updatedBy: userId,
       });
+
+      // Stage 4 (edge cases 5/6): tell the team about DM cancel/reschedule
+      const becameCanceled =
+        override.status === "canceled" && (prior?.status ?? "scheduled") !== "canceled";
+      const newTime = override.scheduledAtOverride
+        ? new Date(override.scheduledAtOverride)
+        : null;
+      const wasRescheduled =
+        !!newTime &&
+        newTime.getTime() !== (prior?.scheduledAtOverride ? new Date(prior.scheduledAtOverride).getTime() : null);
+      if (becameCanceled) {
+        await notifyOccurrenceChanged(storage, teamId, occurrenceKey, {
+          kind: "canceled",
+          actorUserId: userId,
+          transitionAt: override.updatedAt ?? new Date(),
+        }).catch(() => {});
+      } else if (wasRescheduled && override.status !== "canceled") {
+        await notifyOccurrenceChanged(storage, teamId, occurrenceKey, {
+          kind: "rescheduled",
+          actorUserId: userId,
+          newTime: newTime!,
+          transitionAt: override.updatedAt ?? new Date(),
+        }).catch(() => {});
+      }
 
       res.json(override);
     } catch (error) {
