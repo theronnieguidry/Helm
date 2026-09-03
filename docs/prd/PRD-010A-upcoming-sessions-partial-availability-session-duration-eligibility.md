@@ -1,7 +1,7 @@
 # PRD-010A — Upcoming Sessions: Partial Availability, Session Duration, Real-Time Eligibility, and DM Rescheduling
 
 ## Story Status
-Proposed (Follow-up to PRD-010 — Clarifications + Expanded Scope)
+Implemented (Follow-up to PRD-010)
 
 ---
 

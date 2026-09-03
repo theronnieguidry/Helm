@@ -6,6 +6,13 @@ the rest of the group that we're awaiting that person's availability."* Plus: th
 everything else so nothing obvious is missed.
 
 **Date**: 2026-09-02, on `claude/note-taking-completion-49gfvg` at `45a6be8`.
+
+> **UPDATE (2026-09-03): all five stages of §4.5 are implemented** on this
+> branch — see `docs/prd/PRD-051-availability-reminders-and-push-notifications.md`
+> for the shipped spec, decisions, and deviations. Findings S1–S14 are closed
+> (S10's day-hover shows response state rather than session classification by
+> design; PRD tracker drift S15 fixed). Deferred, documented in PRD-051:
+> per-occurrence DM exemptions, new-member digest grace, email channel.
 **Method**: three fresh auditors (server scheduling surface, client scheduling surface,
 PRD/directive intent) + direct schema and dependency reads in the main session. Every claim
 below carries a file:line anchor. Findings are numbered `S#`.

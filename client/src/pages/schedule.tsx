@@ -130,12 +130,18 @@ export default function SchedulePage({ team }: SchedulePageProps) {
       return res.json();
     },
     enabled: !!team.id && !!team.recurrenceFrequency,
+    // Audit S12: the whole point of this page is watching the group converge —
+    // the app-wide staleTime:Infinity default would freeze other members' data
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   });
 
   // Keep old sessions query for manually created sessions
   const { data: sessions, isLoading: sessionsLoading } = useQuery<GameSession[]>({
     queryKey: ["/api/teams", team.id, "sessions"],
     enabled: !!team.id,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   });
 
   const { data: members } = useQuery<(TeamMember & { user?: { firstName?: string; lastName?: string; profileImageUrl?: string } })[]>({
@@ -223,6 +229,9 @@ export default function SchedulePage({ team }: SchedulePageProps) {
       return res.json();
     },
     enabled: !!team.id,
+    // Audit S12: see the candidates query above
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   });
 
   // User availability mutations (PRD-009; stage 2: responses carry a status
@@ -345,9 +354,6 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     deleteResponseForDateKey(format(selectedAvailabilityDate, "yyyy-MM-dd"));
   };
 
-  // PRD-010A: Get DM user ID (excluded from attendance count)
-  const dmUserId = members?.find(m => m.role === "dm")?.userId;
-
   // PRD-010A + audit S4: attendance math now comes from shared/scheduling.ts —
   // the same code the server-side reminder engine runs
   const getAttendance = (candidate: SessionCandidate) => {
@@ -371,15 +377,6 @@ export default function SchedulePage({ team }: SchedulePageProps) {
   // Wall-clock HH:MM of an instant in the TEAM timezone (windows are team-time)
   const sessionWallTime = (instant: Date): string =>
     formatInTimeZone(instant, teamTimezone, "HH:mm");
-
-  // PRD-010B: Check if DM has availability set for a given date
-  const hasDmAvailabilityForDate = (date: Date): boolean => {
-    if (!userAvailability || !dmUserId) return false;
-    const dateKey = format(date, "yyyy-MM-dd");
-    return userAvailability.some(
-      ua => ua.userId === dmUserId && availabilityDateKey(ua) === dateKey
-    );
-  };
 
   // Get member availability for a session candidate (for the session availability modal).
   // Windows are team-timezone times, so they're labeled with the TEAM zone.
@@ -507,28 +504,18 @@ export default function SchedulePage({ team }: SchedulePageProps) {
     return userAvailability.some(ua => availabilityDateKey(ua) === dateKey);
   };
 
-  // PRD-010B: Filter and compute upcoming session candidates
-  // - DM sees all sessions (scheduled AND canceled) when they have availability
-  // - Members only see scheduled sessions that meet threshold
+  // PRD-010B (amended by scheduling audit S9/S10):
+  // - DM sees all future sessions, scheduled AND canceled — identically in
+  //   dev and production (the import.meta.env.DEV fork meant what was tested
+  //   locally was never what shipped)
+  // - Members see all future SCHEDULED sessions; below-threshold ones render
+  //   as "at risk" instead of silently vanishing — at-risk is exactly when
+  //   the group needs the session surfaced
   const upcomingCandidates = candidatesData?.candidates
     ?.filter(c => {
       const isFuture = new Date(c.scheduledAt) > new Date();
-      const isScheduled = c.status === "scheduled";
-
-      // DM sees all sessions (scheduled AND canceled)
-      if (isDM) {
-        // Dev mode: DM must have availability set
-        if (import.meta.env.DEV) {
-          return isFuture && hasDmAvailabilityForDate(new Date(c.scheduledAt));
-        }
-        // Production: show all future sessions regardless of status
-        return isFuture;
-      }
-
-      // Non-DM members: only scheduled sessions that meet threshold
-      if (!isScheduled) return false;
-
-      return isFuture && getAttendance(c).isEligible;
+      if (isDM) return isFuture;
+      return isFuture && c.status === "scheduled";
     })
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
     .slice(0, 5);
@@ -805,6 +792,17 @@ export default function SchedulePage({ team }: SchedulePageProps) {
                               {isCanceled && (
                                 <Badge variant="outline" className="text-red-500 border-red-500/30">
                                   Canceled
+                                </Badge>
+                              )}
+                              {/* Audit S10: below-threshold sessions show as at
+                                  risk instead of disappearing */}
+                              {!isCanceled && !attendance.isEligible && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-amber-600 border-amber-500/30"
+                                  data-testid={`at-risk-${candidate.occurrenceKey}`}
+                                >
+                                  At risk — {Math.max(0, threshold - attendance.eligibleCount)} more needed
                                 </Badge>
                               )}
                             </div>
