@@ -63,6 +63,12 @@ app.use((req, res, next) => {
 (async () => {
   await registerRoutes(httpServer, app);
 
+  // Scheduling audit stage 4: availability reminder engine (hourly sweep +
+  // boot catch-up). Lives here, not in routes.ts, so tests start no timers.
+  const { startReminderEngine } = await import("./jobs/reminder-engine");
+  const { storage } = await import("./storage");
+  startReminderEngine(storage);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";

@@ -104,6 +104,7 @@ vi.mock("@/hooks/use-suggestion-persistence", () => ({
     }),
     reclassifyEntity: vi.fn(),
     markCreated: vi.fn(),
+    unmarkCreated: vi.fn(),
     isDismissed: (id: string) => mockPersistenceState.dismissed.has(id),
     getReclassifiedType: () => undefined,
     isCreated: () => false,
@@ -147,6 +148,7 @@ const mockSessionNote = {
   questStatus: null,
   contentBlocks: null,
   sessionDate: null,
+  reviewedAt: null,
   linkedNoteIds: null,
   sourceSystem: null,
   sourcePageId: null,
@@ -413,7 +415,8 @@ describe("EntitySuggestionsPanel", () => {
         `/api/teams/${mockTeam.id}/notes/new-note-1/backlinks`,
         expect.objectContaining({
           sourceNoteId: mockSessionNote.id,
-          textSnippet: "Lord Blackwood",
+          // PRD-047: snippet is a bounded evidence window around the mention
+          textSnippet: expect.stringContaining("Lord Blackwood"),
           evidenceType: "Mention",
           confidence: 0.8,
         })
@@ -452,5 +455,140 @@ describe("EntitySuggestionsPanel", () => {
     );
 
     expect(screen.getByText("AI Cleanup")).toBeInTheDocument();
+  });
+
+  // Gap F86: deterministic suggestions must not be gated behind the AI toggle
+  it("shows the Suggestions button for saved sessions even when member AI is disabled", () => {
+    render(
+      <EntitySuggestionsPanel
+        team={mockTeam}
+        sessionDate="2026-01-18"
+        content="Lord Blackwood entered the Silverwood Forest and told us many tales of the region."
+        sessionNote={mockSessionNote}
+        memberAiEnabled={false}
+        onNoteCreated={vi.fn()}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    expect(screen.getByText("Suggestions")).toBeInTheDocument();
+    expect(screen.queryByText("AI Cleanup")).not.toBeInTheDocument();
+  });
+
+  // PRD-047: Link Existing Entity creates a backlink with visible evidence + undo
+  describe("link existing entity (PRD-047)", () => {
+    const existingNpc = {
+      ...mockSessionNote,
+      id: "npc-9",
+      title: "Lord Blackwood",
+      noteType: "npc" as const,
+    };
+
+    function createSeededWrapper() {
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: false,
+            staleTime: Infinity,
+          },
+        },
+      });
+      queryClient.setQueryData(
+        ["/api/teams", mockTeam.id, "notes"],
+        [existingNpc]
+      );
+
+      return function Wrapper({ children }: { children: React.ReactNode }) {
+        return (
+          <QueryClientProvider client={queryClient}>
+            {children}
+          </QueryClientProvider>
+        );
+      };
+    }
+
+    function renderPanel() {
+      return render(
+        <EntitySuggestionsPanel
+          team={mockTeam}
+          sessionDate="2026-01-18"
+          content="Lord Blackwood entered the Silverwood Forest."
+          sessionNote={mockSessionNote}
+          memberAiEnabled={false}
+          onNoteCreated={vi.fn()}
+        />,
+        { wrapper: createSeededWrapper() }
+      );
+    }
+
+    it("creates a backlink and shows Linked state with evidence snippet and Undo", async () => {
+      mockApiRequest.mockImplementation(async (method: string, url: string) => {
+        if (
+          method === "POST" &&
+          url === `/api/teams/${mockTeam.id}/notes/npc-9/backlinks`
+        ) {
+          return { json: async () => ({ id: "backlink-9" }) };
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      });
+
+      renderPanel();
+
+      // Matched entity appears under Existing Entities with a Link action
+      expect(await screen.findByText("Existing Entities")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /^Link$/ }));
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          "POST",
+          `/api/teams/${mockTeam.id}/notes/npc-9/backlinks`,
+          expect.objectContaining({
+            sourceNoteId: mockSessionNote.id,
+            evidenceType: "Mention",
+            confidence: 0.8,
+            textSnippet: expect.stringContaining("Lord Blackwood"),
+          })
+        );
+      });
+
+      // FR-2: row shows Linked state + inline evidence snippet
+      expect(await screen.findByText("Linked")).toBeInTheDocument();
+      expect(screen.getByTestId("linked-snippet")).toHaveTextContent(
+        "Lord Blackwood"
+      );
+      // FR-3: undo is offered
+      expect(screen.getByRole("button", { name: /^Undo$/ })).toBeInTheDocument();
+    });
+
+    it("undo deletes the backlink and reverts the row to actionable", async () => {
+      mockApiRequest.mockImplementation(async (method: string, url: string) => {
+        if (method === "POST") {
+          return { json: async () => ({ id: "backlink-9" }) };
+        }
+        if (
+          method === "DELETE" &&
+          url === `/api/teams/${mockTeam.id}/backlinks/backlink-9`
+        ) {
+          return { json: async () => ({ success: true }) };
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      });
+
+      renderPanel();
+
+      fireEvent.click(await screen.findByRole("button", { name: /^Link$/ }));
+      fireEvent.click(await screen.findByRole("button", { name: /^Undo$/ }));
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          "DELETE",
+          `/api/teams/${mockTeam.id}/backlinks/backlink-9`
+        );
+      });
+
+      // Row is actionable again
+      expect(await screen.findByRole("button", { name: /^Link$/ })).toBeInTheDocument();
+      expect(screen.queryByText("Linked")).not.toBeInTheDocument();
+    });
   });
 });

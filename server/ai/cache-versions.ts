@@ -23,12 +23,24 @@ export const AI_ALGORITHM_VERSIONS = {
     ],
   },
   relationship: {
-    current: "1.0.0",
+    // 1.1.0: cached relationship entries now store _cachedFromKeyHash (full
+    // normalized content hash of the "from" note) instead of a 100-char
+    // content prefix. The old prefix-based direction check could never match
+    // notes longer than 100 chars, causing cached directional relationships
+    // to be returned reversed. Bumping the version invalidates all 1.0.0
+    // entries so getRelationship never sees an entry without _cachedFromKeyHash.
+    current: "1.1.0",
     history: [
       {
         version: "1.0.0",
         date: "2026-01-19",
         description: "Initial caching implementation with order-independent pair hashing",
+      },
+      {
+        version: "1.1.0",
+        date: "2026-07-06",
+        description:
+          "Store full normalized from-note hash (_cachedFromKeyHash) for direction detection; fixes reversed directions for notes >100 chars",
       },
     ],
   },

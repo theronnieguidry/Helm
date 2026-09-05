@@ -37,12 +37,15 @@ import {
   Link2,
   Plus,
   Check,
+  CheckCircle,
   X,
   Sparkles,
   Loader2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useEntityDetection } from "@/hooks/use-entity-detection";
+import { useSuggestionPersistence } from "@/hooks/use-suggestion-persistence";
+import { format } from "date-fns";
 import { SelectableContent } from "@/components/selectable-content";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Note, NoteType, Team } from "@shared/schema";
@@ -91,16 +94,25 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
   const [selectedEntity, setSelectedEntity] = useState<DetectedEntity | null>(
     null
   );
+  // Gap F20 (PRD-003 FR-4): when the create dialog is opened from a text
+  // selection there is no DetectedEntity, so we capture the selection's text
+  // and (best-effort) offsets here so the created note can still be
+  // backlinked to the session instead of being silently orphaned.
+  const [pendingSelection, setPendingSelection] = useState<{
+    text: string;
+    blockId?: string;
+    startOffset?: number;
+    endOffset?: number;
+  } | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [createFormData, setCreateFormData] = useState({
     title: "",
     content: "",
     noteType: "npc" as NoteType,
   });
-  const [linkedEntities, setLinkedEntities] = useState<Set<string>>(new Set());
-  const [dismissedEntities, setDismissedEntities] = useState<Set<string>>(
-    new Set()
-  );
+  // Gap F18 (PRD-003): review progress must survive refresh. Persist
+  // dismissed/linked state in localStorage keyed by the session's own date,
+  // via the same hook the live editor panel uses.
   const [selectedAssociations, setSelectedAssociations] = useState<Set<string>>(
     new Set()
   );
@@ -116,6 +128,48 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     queryKey: ["/api/teams", team.id, "notes"],
     enabled: !!team.id,
   });
+
+  // Gap F19 (PRD-003 FR-5): mark/unmark the session log as reviewed via the
+  // notes PATCH endpoint's reviewedAt field.
+  const markReviewedMutation = useMutation({
+    mutationFn: async (reviewedAt: string | null) => {
+      const response = await apiRequest(
+        "PATCH",
+        `/api/teams/${team.id}/notes/${params.noteId}`,
+        { reviewedAt }
+      );
+      return response.json();
+    },
+    onSuccess: (_note, reviewedAt) => {
+      // Prefix-invalidates both the notes list and this session's detail query
+      queryClient.invalidateQueries({
+        queryKey: ["/api/teams", team.id, "notes"],
+      });
+      toast({
+        title: reviewedAt ? "Session marked as reviewed" : "Review mark removed",
+        description: reviewedAt
+          ? "This session log is now marked as reviewed."
+          : "This session log is no longer marked as reviewed.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to update review status",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const persistence = useSuggestionPersistence({
+    teamId: team.id,
+    sessionDate: sessionLog?.sessionDate
+      ? format(new Date(sessionLog.sessionDate), "yyyy-MM-dd")
+      : undefined,
+    enabled: !!sessionLog,
+  });
+  const linkedEntities = persistence.created;
+  const dismissedEntities = persistence.dismissed;
 
   // Create note mutation
   const createNoteMutation = useMutation({
@@ -172,6 +226,20 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
             });
           });
         }
+      } else if (sessionLog && pendingSelection) {
+        // Gap F20 (PRD-003 FR-4): selection-created entities must link back
+        // to the session too — previously this path was skipped entirely.
+        createBacklinkMutation.mutate({
+          targetNoteId: newNote.id,
+          sourceNoteId: sessionLog.id,
+          textSnippet: pendingSelection.text,
+          sourceBlockId: pendingSelection.blockId,
+          startOffset: pendingSelection.startOffset,
+          endOffset: pendingSelection.endOffset,
+          evidenceType: "Mention",
+          confidence: 0.8,
+        });
+        setPendingSelection(null);
       }
 
       toast({
@@ -217,7 +285,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     },
     onSuccess: () => {
       if (selectedEntity) {
-        setLinkedEntities((prev) => new Set(prev).add(selectedEntity.id));
+        persistence.markCreated(selectedEntity.id);
       }
     },
   });
@@ -293,6 +361,33 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     return detectedEntities.filter((e) => entityMatches.has(e.id));
   }, [detectedEntities, entityMatches]);
 
+  // Gap F29: completion/progress semantics.
+  //
+  // Every detected entity is actionable: "new" entities offer Create/Dismiss,
+  // and matched entities offer a Link button (the one action the panel asks
+  // the user to take on them). An entity counts as processed once it has been
+  // linked (persistence.created) or dismissed; an unlinked match therefore
+  // counts toward "remaining" rather than being silently excluded — which is
+  // what previously made the numbers inconsistent and "Review Complete"
+  // unreachable whenever any match existed. Counts intersect the persisted
+  // sets with the currently-detected entity ids so stale localStorage entries
+  // from earlier content can't inflate progress.
+  const linkedCount = useMemo(
+    () => detectedEntities.filter((e) => linkedEntities.has(e.id)).length,
+    [detectedEntities, linkedEntities]
+  );
+  const dismissedCount = useMemo(
+    () =>
+      detectedEntities.filter(
+        (e) => dismissedEntities.has(e.id) && !linkedEntities.has(e.id)
+      ).length,
+    [detectedEntities, dismissedEntities, linkedEntities]
+  );
+  const totalCount = detectedEntities.length;
+  const processedCount = linkedCount + dismissedCount;
+  const remainingCount = totalCount - processedCount;
+  const isReviewComplete = totalCount > 0 && processedCount >= totalCount;
+
   // Compute proximity suggestions for all entities
   const proximitySuggestions = useMemo(() => {
     if (!sessionLog || detectedEntities.length === 0) return new Map<string, ProximitySuggestion>();
@@ -346,6 +441,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
 
   const handleCreateEntity = (entity: DetectedEntity) => {
     setSelectedEntity(entity);
+    setPendingSelection(null);
     setCreateFormData({
       title: entity.text,
       content: "",
@@ -385,7 +481,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
     setSelectedEntity(entity);
   };
 
-  // Handle creating entity from text selection
+  // Handle creating entity from text selection (gap F20, PRD-003 FR-4)
   const handleCreateFromSelection = (text: string, type: EntityType) => {
     setCreateFormData({
       title: text,
@@ -393,6 +489,35 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
       noteType: ENTITY_TYPE_NOTE_TYPE[type],
     });
     setSelectedEntity(null); // Not from detected entity
+    // Locate the selected text in the session content (first occurrence) so
+    // the backlink created after the note gets real offsets; if it can't be
+    // found, fall back to a snippet-only backlink.
+    let selection: {
+      text: string;
+      blockId?: string;
+      startOffset?: number;
+      endOffset?: number;
+    } = { text };
+    if (sessionLog?.contentBlocks && sessionLog.contentBlocks.length > 0) {
+      for (const block of sessionLog.contentBlocks) {
+        const idx = block.content.indexOf(text);
+        if (idx >= 0) {
+          selection = {
+            text,
+            blockId: block.id,
+            startOffset: idx,
+            endOffset: idx + text.length,
+          };
+          break;
+        }
+      }
+    } else if (sessionLog?.content) {
+      const idx = sessionLog.content.indexOf(text);
+      if (idx >= 0) {
+        selection = { text, startOffset: idx, endOffset: idx + text.length };
+      }
+    }
+    setPendingSelection(selection);
     setSelectedAssociations(new Set()); // No proximity suggestions for manual selection
     setIsCreateOpen(true);
   };
@@ -411,7 +536,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
   };
 
   const handleDismissEntity = (entityId: string) => {
-    setDismissedEntities((prev) => new Set(prev).add(entityId));
+    persistence.dismissEntity(entityId);
   };
 
   if (isLoadingSession || isLoadingNotes) {
@@ -452,10 +577,39 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
         <Button variant="ghost" size="icon" onClick={() => navigate("/notes")}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
-        <div>
+        <div className="flex-1 min-w-0">
           <h1 className="text-2xl font-medium">Review Session</h1>
-          <p className="text-muted-foreground">{sessionLog.title}</p>
+          <p className="text-muted-foreground">
+            {sessionLog.title}
+            {sessionLog.reviewedAt && (
+              <span className="ml-2 text-xs text-green-600 dark:text-green-500">
+                · Reviewed {format(new Date(sessionLog.reviewedAt), "MMM d, yyyy")}
+              </span>
+            )}
+          </p>
         </div>
+        {/* Gap F19 (PRD-003 FR-5): mark-reviewed action + visual state */}
+        {sessionLog.reviewedAt ? (
+          <Button
+            variant="outline"
+            onClick={() => markReviewedMutation.mutate(null)}
+            disabled={markReviewedMutation.isPending}
+            title="Click to un-mark as reviewed"
+          >
+            <CheckCircle className="h-4 w-4 mr-2 text-green-500" />
+            Reviewed ✓
+          </Button>
+        ) : (
+          <Button
+            onClick={() =>
+              markReviewedMutation.mutate(new Date().toISOString())
+            }
+            disabled={markReviewedMutation.isPending}
+          >
+            <CheckCircle className="h-4 w-4 mr-2" />
+            Mark as Reviewed
+          </Button>
+        )}
       </div>
 
       <ResizablePanelGroup direction="horizontal" className="min-h-[600px]">
@@ -499,9 +653,9 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
                   <Sparkles className="h-5 w-5" />
                   Detected Entities
                 </CardTitle>
-                {detectedEntities.length > 0 && (
+                {totalCount > 0 && (
                   <div className="text-sm text-muted-foreground">
-                    {linkedEntities.size + dismissedEntities.size} / {detectedEntities.length} processed
+                    {processedCount} / {totalCount} processed
                   </div>
                 )}
               </div>
@@ -518,7 +672,7 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
                 <p className="text-destructive text-sm text-center py-8">
                   Failed to detect entities: {detectionError}
                 </p>
-              ) : activeEntities.length === 0 && matchedEntities.length === 0 ? (
+              ) : detectedEntities.length === 0 ? (
                 <p className="text-muted-foreground text-sm text-center py-8">
                   No entities detected. Add content to your session log to detect
                   potential people, places, and quests.
@@ -639,9 +793,9 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
                     </div>
                   )}
 
-                  {/* Progress summary */}
+                  {/* Progress summary (see F29 semantics comment above) */}
                   <div className="border-t pt-4 space-y-2">
-                    {detectedEntities.length > 0 && (
+                    {totalCount > 0 && (
                       <>
                         {/* Progress bar */}
                         <div className="w-full bg-muted rounded-full h-2">
@@ -649,28 +803,27 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
                             className="bg-primary h-2 rounded-full transition-all"
                             style={{
                               width: `${Math.round(
-                                ((linkedEntities.size + dismissedEntities.size) /
-                                  detectedEntities.length) *
+                                (Math.min(processedCount, totalCount) /
+                                  totalCount) *
                                   100
                               )}%`,
                             }}
                           />
                         </div>
                         <div className="flex justify-between text-xs text-muted-foreground">
-                          <span>{linkedEntities.size} linked</span>
-                          <span>{dismissedEntities.size} dismissed</span>
-                          <span>{activeEntities.length} remaining</span>
+                          <span>{linkedCount} linked</span>
+                          <span>{dismissedCount} dismissed</span>
+                          <span>{remainingCount} remaining</span>
                         </div>
-                        {activeEntities.length === 0 &&
-                          matchedEntities.length === 0 && (
-                            <div className="text-center py-2">
-                              <Check className="h-8 w-8 text-green-500 mx-auto mb-2" />
-                              <p className="text-sm font-medium">Review Complete</p>
-                              <p className="text-xs text-muted-foreground">
-                                All entities have been processed
-                              </p>
-                            </div>
-                          )}
+                        {isReviewComplete && (
+                          <div className="text-center py-2">
+                            <Check className="h-8 w-8 text-green-500 mx-auto mb-2" />
+                            <p className="text-sm font-medium">Review Complete</p>
+                            <p className="text-xs text-muted-foreground">
+                              All entities have been processed
+                            </p>
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -682,7 +835,13 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
       </ResizablePanelGroup>
 
       {/* Create Entity Dialog */}
-      <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+      <Dialog
+        open={isCreateOpen}
+        onOpenChange={(open) => {
+          setIsCreateOpen(open);
+          if (!open) setPendingSelection(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Create Entity</DialogTitle>
@@ -769,7 +928,13 @@ export default function SessionReviewPage({ team }: SessionReviewPageProps) {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsCreateOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsCreateOpen(false);
+                setPendingSelection(null);
+              }}
+            >
               Cancel
             </Button>
             <Button

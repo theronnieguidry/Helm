@@ -12,6 +12,8 @@ import {
   type Backlink, type InsertBacklink,
   type UserAvailability, type InsertUserAvailability,
   type SessionOverride, type InsertSessionOverride,
+  type PushSubscription, type InsertPushSubscription,
+  type Notification, type InsertNotification,
   type ImportRun, type InsertImportRun, type ImportRunStatus,
   type NoteImportSnapshot, type InsertNoteImportSnapshot,
   type ImportRunOptions, type ImportRunStats,
@@ -33,6 +35,7 @@ import {
   type ContentBlock,
   type SessionStatus,
 } from "@shared/schema";
+import { availabilityDateKey } from "@shared/scheduling";
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
@@ -201,9 +204,11 @@ export class MemoryStorage implements IStorage {
       daysOfMonth: team.daysOfMonth as number[] ?? null,
       startTime: team.startTime ?? null,
       timezone: team.timezone ?? null,
-      recurrenceAnchorDate: null,
-      minAttendanceThreshold: 2,
-      defaultSessionDurationMinutes: 180,
+      // Audit S8: these used to be hardcoded, silently dropping caller values —
+      // which made biweekly recurrence untestable through MemoryStorage
+      recurrenceAnchorDate: team.recurrenceAnchorDate ?? null,
+      minAttendanceThreshold: team.minAttendanceThreshold ?? 2,
+      defaultSessionDurationMinutes: team.defaultSessionDurationMinutes ?? 180,
       // PRD-027: AI Features paywall
       aiEnabled: team.aiEnabled ?? false,
       aiEnabledAt: team.aiEnabledAt ?? null,
@@ -281,6 +286,10 @@ export class MemoryStorage implements IStorage {
       // PRD-028: Per-member AI features
       aiEnabled: member.aiEnabled ?? false,
       aiEnabledAt: member.aiEnabledAt ?? null,
+      // Stage 3: notification preferences default on
+      notifyAvailabilityReminders: member.notifyAvailabilityReminders ?? true,
+      notifyGroupAwaiting: member.notifyGroupAwaiting ?? true,
+      notifyGameDay: member.notifyGameDay ?? true,
       joinedAt: new Date(),
     };
     this.teamMembers.set(id, newMember);
@@ -349,6 +358,7 @@ export class MemoryStorage implements IStorage {
       authorId: note.authorId,
       title: note.title,
       content: note.content ?? null,
+      reviewedAt: note.reviewedAt ?? null,
       noteType,
       isPrivate: note.isPrivate ?? false,
       parentNoteId: note.parentNoteId ?? null,
@@ -407,8 +417,8 @@ export class MemoryStorage implements IStorage {
       });
   }
 
-  // PRD-019: Find session by date for today's session editor
-  async findSessionByDate(teamId: string, date: Date): Promise<Note | undefined> {
+  // PRD-019: Find session by date for today's session editor (M1: scoped per author)
+  async findSessionByDate(teamId: string, date: Date, authorId: string): Promise<Note | undefined> {
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(date);
@@ -416,6 +426,7 @@ export class MemoryStorage implements IStorage {
 
     return Array.from(this.notes.values()).find(
       n => n.teamId === teamId &&
+        n.authorId === authorId &&
         n.noteType === "session_log" &&
         n.sessionDate &&
         n.sessionDate >= startOfDay &&
@@ -602,8 +613,10 @@ export class MemoryStorage implements IStorage {
       ...backlink,
       ...data,
       evidenceType: data.evidenceType ? validateEvidenceType(data.evidenceType) : backlink.evidenceType,
-      startOffset: data.startOffset ?? backlink.startOffset,
-      endOffset: data.endOffset ?? backlink.endOffset,
+      // M7: an explicit null clears offsets (orphaned backlink) — mirror the
+      // DB storage, which sets whatever the caller passed.
+      startOffset: "startOffset" in data ? data.startOffset ?? null : backlink.startOffset,
+      endOffset: "endOffset" in data ? data.endOffset ?? null : backlink.endOffset,
       confidence: data.confidence ?? backlink.confidence,
     } as Backlink;
     this.backlinks.set(id, updated);
@@ -641,18 +654,19 @@ export class MemoryStorage implements IStorage {
   }
 
   async getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined> {
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Audit S5: same calendar-day matching as DatabaseStorage — key equality
+    // via availabilityDateKey's rounding, host-TZ independent
+    const targetKey = availabilityDateKey({ date });
 
-    return Array.from(this.userAvailabilityMap.values()).find(ua => {
-      const uaDate = new Date(ua.date);
-      return ua.teamId === teamId &&
-             ua.userId === userId &&
-             uaDate >= startOfDay &&
-             uaDate <= endOfDay;
-    });
+    return Array.from(this.userAvailabilityMap.values()).find(ua =>
+      ua.teamId === teamId &&
+      ua.userId === userId &&
+      availabilityDateKey(ua) === targetKey
+    );
+  }
+
+  async getUserAvailabilityById(id: string): Promise<UserAvailability | undefined> {
+    return this.userAvailabilityMap.get(id);
   }
 
   async createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability> {
@@ -662,8 +676,9 @@ export class MemoryStorage implements IStorage {
       teamId: data.teamId,
       userId: data.userId,
       date: data.date,
-      startTime: data.startTime,
-      endTime: data.endTime,
+      status: (data.status as UserAvailability["status"]) ?? "available",
+      startTime: data.startTime ?? null,
+      endTime: data.endTime ?? null,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -674,7 +689,7 @@ export class MemoryStorage implements IStorage {
   async updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability> {
     const existing = this.userAvailabilityMap.get(id);
     if (!existing) throw new Error("User availability not found");
-    const updated: UserAvailability = { ...existing, ...data, updatedAt: new Date() };
+    const updated = { ...existing, ...data, updatedAt: new Date() } as UserAvailability;
     this.userAvailabilityMap.set(id, updated);
     return updated;
   }
@@ -694,6 +709,10 @@ export class MemoryStorage implements IStorage {
     return Array.from(this.sessionOverridesMap.values()).find(
       so => so.teamId === teamId && so.occurrenceKey === occurrenceKey
     );
+  }
+
+  async getSessionOverrideById(id: string): Promise<SessionOverride | undefined> {
+    return this.sessionOverridesMap.get(id);
   }
 
   async upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride> {
@@ -729,6 +748,116 @@ export class MemoryStorage implements IStorage {
 
   async deleteSessionOverride(id: string): Promise<void> {
     this.sessionOverridesMap.delete(id);
+  }
+
+  // Push Subscriptions + Notifications (scheduling audit stage 3)
+  private pushSubscriptionsMap: Map<string, PushSubscription> = new Map();
+  private notificationsMap: Map<string, Notification> = new Map();
+
+  async upsertPushSubscription(data: InsertPushSubscription): Promise<PushSubscription> {
+    const existing = Array.from(this.pushSubscriptionsMap.values()).find(
+      s => s.endpoint === data.endpoint
+    );
+    if (existing) {
+      const updated: PushSubscription = {
+        ...existing,
+        userId: data.userId,
+        p256dh: data.p256dh,
+        auth: data.auth,
+        userAgent: data.userAgent ?? existing.userAgent,
+        lastSeenAt: new Date(),
+      };
+      this.pushSubscriptionsMap.set(existing.id, updated);
+      return updated;
+    }
+    const id = generateId();
+    const created: PushSubscription = {
+      id,
+      userId: data.userId,
+      endpoint: data.endpoint,
+      p256dh: data.p256dh,
+      auth: data.auth,
+      userAgent: data.userAgent ?? null,
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+    };
+    this.pushSubscriptionsMap.set(id, created);
+    return created;
+  }
+
+  async getPushSubscriptionsForUser(userId: string): Promise<PushSubscription[]> {
+    return Array.from(this.pushSubscriptionsMap.values()).filter(s => s.userId === userId);
+  }
+
+  async deletePushSubscriptionByEndpoint(endpoint: string): Promise<void> {
+    for (const [id, sub] of Array.from(this.pushSubscriptionsMap.entries())) {
+      if (sub.endpoint === endpoint) this.pushSubscriptionsMap.delete(id);
+    }
+  }
+
+  async createNotification(data: InsertNotification): Promise<Notification> {
+    // Mirror the DB unique constraint on dedupeKey
+    const dupe = await this.getNotificationByDedupeKey(data.dedupeKey);
+    if (dupe) throw new Error(`duplicate key value violates unique constraint: ${data.dedupeKey}`);
+    const id = generateId();
+    const created: Notification = {
+      id,
+      userId: data.userId,
+      teamId: data.teamId,
+      type: data.type as Notification["type"],
+      occurrenceKey: data.occurrenceKey ?? null,
+      stage: data.stage ?? null,
+      dedupeKey: data.dedupeKey,
+      title: data.title,
+      body: data.body,
+      url: data.url ?? null,
+      pushSent: data.pushSent ?? false,
+      readAt: data.readAt ?? null,
+      createdAt: new Date(),
+    };
+    this.notificationsMap.set(id, created);
+    return created;
+  }
+
+  async getNotificationByDedupeKey(dedupeKey: string): Promise<Notification | undefined> {
+    return Array.from(this.notificationsMap.values()).find(n => n.dedupeKey === dedupeKey);
+  }
+
+  async getNotificationsForUser(userId: string, limit = 50): Promise<Notification[]> {
+    return Array.from(this.notificationsMap.values())
+      .filter(n => n.userId === userId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
+
+  async markNotificationsRead(userId: string, ids?: string[]): Promise<void> {
+    for (const [id, n] of Array.from(this.notificationsMap.entries())) {
+      if (n.userId !== userId) continue;
+      if (ids && ids.length > 0 && !ids.includes(id)) continue;
+      this.notificationsMap.set(id, { ...n, readAt: new Date() });
+    }
+  }
+
+  async updateNotificationPushSent(id: string, pushSent: boolean): Promise<void> {
+    const n = this.notificationsMap.get(id);
+    if (n) this.notificationsMap.set(id, { ...n, pushSent });
+  }
+
+  async updateMemberNotificationPrefs(
+    memberId: string,
+    prefs: { notifyAvailabilityReminders?: boolean; notifyGroupAwaiting?: boolean; notifyGameDay?: boolean }
+  ): Promise<TeamMember> {
+    const member = this.teamMembers.get(memberId);
+    if (!member) throw new Error("Team member not found");
+    const updated = { ...member, ...prefs };
+    this.teamMembers.set(memberId, updated);
+    return updated;
+  }
+
+  async listTeamsWithRecurrence(): Promise<Team[]> {
+    return Array.from(this.teams.values()).filter(
+      t => t.recurrenceFrequency != null && t.startTime != null
+    );
   }
 
   // Import Runs (PRD-015A)

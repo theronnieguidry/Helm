@@ -1,7 +1,7 @@
 # PRD — Schedule Availability Interaction (Refined to Match Current Calendar UI)
 
 ## Story Status
-Proposed (High Priority UX Refinement)
+Implemented
 
 ---
 

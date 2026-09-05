@@ -15,6 +15,7 @@ import {
   type NoteType,
   type QuestStatus,
   type ImportVisibility,
+  type ImportRun,
   type ImportRunStats,
   type RelationshipType,
   type EvidenceType,
@@ -46,6 +47,53 @@ import {
   ENABLE_ENTITY_DETAIL_ENDPOINT,
   ENABLE_NUCLINO_LINK_EVIDENCE,
 } from "./feature-flags";
+import { canViewNote, filterVisibleNotes } from "./note-visibility";
+import {
+  resolveEmptyPageSelection,
+  filterPagesToImport,
+  completeImportRun,
+  markImportRunFailed,
+} from "./import-run-helpers";
+import {
+  makeListNotesHandler,
+  makeTodaySessionHandler,
+  makeNeedsReviewHandler,
+  makeCreateNoteHandler,
+  makeUpdateNoteHandler,
+  makeDeleteNoteHandler,
+} from "./notes-handlers";
+import {
+  makeGetSessionsHandler,
+  makeCreateSessionHandler,
+  makeUpdateSessionStatusHandler,
+  makeGetLegacyAvailabilityHandler,
+  makeUpsertLegacyAvailabilityHandler,
+  makeGetUserAvailabilityHandler,
+  makeCreateUserAvailabilityHandler,
+  makeUpdateUserAvailabilityHandler,
+  makeDeleteUserAvailabilityHandler,
+  makeSessionCandidatesHandler,
+  makeUpsertSessionOverrideHandler,
+  makeGetSessionOverridesHandler,
+  makeDeleteSessionOverrideHandler,
+} from "./scheduling-handlers";
+import {
+  makePushPublicKeyHandler,
+  makeSavePushSubscriptionHandler,
+  makeDeletePushSubscriptionHandler,
+  makeListNotificationsHandler,
+  makeMarkNotificationsReadHandler,
+  makeUpdateNotificationPrefsHandler,
+} from "./notification-handlers";
+import {
+  sessionAudioUpload,
+  makeSessionRecordingUploadHandler,
+  makeSessionRecordingStatusHandler,
+  makeSessionRecordingConfigHandler,
+} from "./audio/session-audio-handlers";
+
+// PRD-050 FR-3: explicit Nuclino links are high-confidence evidence.
+const NUCLINO_LINK_EVIDENCE_CONFIDENCE = 0.9;
 
 // PRD-015: Multer config for ZIP file uploads (store in memory)
 const upload = multer({
@@ -69,6 +117,8 @@ interface ImportPlan {
   collections: Map<string, CollectionInfo>;
   classifications: Map<string, PageClassification>;
   summary: ImportSummary;
+  // PRD-052: the same plan/commit pipeline serves multiple source systems
+  sourceSystem: "NUCLINO" | "ONENOTE";
   createdAt: Date;
 }
 const importPlanCache = new Map<string, ImportPlan>();
@@ -156,10 +206,6 @@ export function updateImportProgress(
 
 const RELATIONSHIP_TYPE_SET = new Set<RelationshipType>(RELATIONSHIP_TYPES);
 const EVIDENCE_TYPE_SET = new Set<EvidenceType>(EVIDENCE_TYPES);
-
-function canViewNote(note: { isPrivate: boolean | null; authorId: string }, userId: string, role: "dm" | "member"): boolean {
-  return !note.isPrivate || note.authorId === userId || role === "dm";
-}
 
 function getSessionContent(note: {
   content?: string | null;
@@ -469,7 +515,13 @@ export async function registerRoutes(
   app.post("/api/teams", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
-      const { name, teamType, diceMode, recurrenceFrequency, dayOfWeek, daysOfMonth, startTime, timezone } = req.body;
+      // Audit S14: anchor/threshold/duration were previously impossible to set
+      // at creation, so biweekly teams needed a follow-up PATCH
+      const {
+        name, teamType, diceMode, recurrenceFrequency, dayOfWeek, daysOfMonth,
+        startTime, timezone, recurrenceAnchorDate, minAttendanceThreshold,
+        defaultSessionDurationMinutes,
+      } = req.body;
 
       const team = await storage.createTeam({
         name,
@@ -481,6 +533,9 @@ export async function registerRoutes(
         daysOfMonth,
         startTime,
         timezone,
+        recurrenceAnchorDate: recurrenceAnchorDate ? new Date(recurrenceAnchorDate) : undefined,
+        minAttendanceThreshold,
+        defaultSessionDurationMinutes,
       });
 
       await storage.createTeamMember({
@@ -515,7 +570,24 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Not authorized" });
       }
 
-      const team = await storage.updateTeam(id, req.body);
+      // Audit S7: explicit allow-list — req.body used to pass straight through,
+      // making ownerId and the AI paywall flag mass-assignable by any DM PATCH
+      const body = req.body ?? {};
+      const updateData: Record<string, unknown> = {};
+      for (const field of [
+        "name", "teamType", "diceMode", "recurrenceFrequency", "dayOfWeek",
+        "daysOfMonth", "startTime", "timezone", "minAttendanceThreshold",
+        "defaultSessionDurationMinutes",
+      ]) {
+        if (field in body) updateData[field] = body[field];
+      }
+      if ("recurrenceAnchorDate" in body) {
+        updateData.recurrenceAnchorDate = body.recurrenceAnchorDate
+          ? new Date(body.recurrenceAnchorDate)
+          : null;
+      }
+
+      const team = await storage.updateTeam(id, updateData);
       res.json(team);
     } catch (error) {
       console.error("Error updating team:", error);
@@ -710,61 +782,13 @@ export async function registerRoutes(
   });
 
   // Get notes
-  app.get("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const notes = await storage.getNotes(teamId);
-      res.json(notes);
-    } catch (error) {
-      console.error("Error fetching notes:", error);
-      res.status(500).json({ message: "Failed to fetch notes" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes", isAuthenticated, makeListNotesHandler(storage));
 
   // PRD-019: Get today's session note
-  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const todaySession = await storage.findSessionByDate(teamId, new Date());
-      res.json(todaySession ?? null);
-    } catch (error) {
-      console.error("Error fetching today's session:", error);
-      res.status(500).json({ message: "Failed to fetch today's session" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, makeTodaySessionHandler(storage));
 
   // PRD-037: Get notes needing review (low-confidence AI classifications)
-  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const items = await storage.getPendingLowConfidenceClassifications(teamId);
-      res.json({ items, count: items.length });
-    } catch (error) {
-      console.error("Error fetching needs-review items:", error);
-      res.status(500).json({ message: "Failed to fetch needs-review items" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, makeNeedsReviewHandler(storage));
 
   // PRD-048: Single note detail endpoint with references and relationships
   app.get("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
@@ -819,20 +843,42 @@ export async function registerRoutes(
         }
       }
 
-      const normalizedReferencesIn = referencesIn.map((reference) => {
-        const sourceNote = relatedNoteMap.get(reference.sourceNoteId);
-        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
-        return {
-          ...reference,
-          sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
-          sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
-          sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
-          textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
-          snippetPreview: sourceVisible
-            ? toSnippetPreview(reference.textSnippet, "")
-            : "Referenced in a private note",
-        };
-      });
+      // PRD-048 FR-1b: include author names for reference entries
+      const teamMembersWithUsers = await storage.getTeamMembers(teamId);
+      const memberNameByUserId = new Map<string, string>();
+      for (const teamMember of teamMembersWithUsers) {
+        const name = [teamMember.user?.firstName, teamMember.user?.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        memberNameByUserId.set(teamMember.userId, name || teamMember.user?.email || "Unknown");
+      }
+
+      const normalizedReferencesIn = referencesIn
+        .map((reference) => {
+          const sourceNote = relatedNoteMap.get(reference.sourceNoteId);
+          const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
+          return {
+            ...reference,
+            sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
+            sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
+            sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
+            sourceNoteSessionDate: sourceVisible ? sourceNote?.sessionDate ?? null : null,
+            createdByName: reference.createdByUserId
+              ? memberNameByUserId.get(reference.createdByUserId) ?? null
+              : null,
+            textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
+            snippetPreview: sourceVisible
+              ? toSnippetPreview(reference.textSnippet, "")
+              : "Referenced in a private note",
+          };
+        })
+        // PRD-048 FR-2: order by most recent session date, then creation time
+        .sort((a, b) => {
+          const aDate = a.sourceNoteSessionDate ?? a.createdAt;
+          const bDate = b.sourceNoteSessionDate ?? b.createdAt;
+          return new Date(bDate ?? 0).getTime() - new Date(aDate ?? 0).getTime();
+        });
 
       const normalizedReferencesOut = referencesOut.map((reference) => {
         const targetNote = relatedNoteMap.get(reference.targetNoteId);
@@ -970,108 +1016,13 @@ export async function registerRoutes(
   });
 
   // Create note
-  app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      // PRD-034: Accept importRunId for suggestion-created entities to enable cascade delete
-      const { title, content, noteType, isPrivate, questStatus, contentBlocks, sessionDate, linkedNoteIds, importRunId } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      // For session_log type, check if one already exists for the given date (idempotency)
-      if (noteType === "session_log" && sessionDate) {
-        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
-        if (existing) {
-          // Return existing session instead of creating duplicate
-          return res.status(200).json(existing);
-        }
-      }
-
-      const note = await storage.createNote({
-        teamId,
-        authorId: userId,
-        title,
-        content,
-        noteType,
-        isPrivate,
-        questStatus,
-        contentBlocks,
-        sessionDate: sessionDate ? new Date(sessionDate) : undefined,
-        linkedNoteIds,
-        importRunId: importRunId || undefined, // PRD-034: Track import origin for cascade delete
-      });
-
-      res.json(note);
-    } catch (error) {
-      console.error("Error creating note:", error);
-      res.status(500).json({ message: "Failed to create note" });
-    }
-  });
+  app.post("/api/teams/:teamId/notes", isAuthenticated, makeCreateNoteHandler(storage));
 
   // Update note
-  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-      
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const existingNote = await storage.getNote(noteId);
-      if (!existingNote || existingNote.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (existingNote.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized to edit this note" });
-      }
-
-      const updateData = {
-        ...req.body,
-        sessionDate: req.body.sessionDate ? new Date(req.body.sessionDate) : req.body.sessionDate,
-      };
-
-      const note = await storage.updateNote(noteId, updateData);
-      res.json(note);
-    } catch (error) {
-      console.error("Error updating note:", error);
-      res.status(500).json({ message: "Failed to update note" });
-    }
-  });
+  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeUpdateNoteHandler(storage));
 
   // Delete note
-  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const existingNote = await storage.getNote(noteId);
-      if (!existingNote || existingNote.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (existingNote.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized to delete this note" });
-      }
-
-      await storage.deleteNote(noteId);
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error deleting note:", error);
-      res.status(500).json({ message: "Failed to delete note" });
-    }
-  });
+  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeDeleteNoteHandler(storage));
 
   // Get backlinks for a note (PRD-005)
   app.get("/api/teams/:teamId/notes/:noteId/backlinks", isAuthenticated, async (req: any, res) => {
@@ -1502,6 +1453,7 @@ export async function registerRoutes(
         collections,
         classifications,
         summary,
+        sourceSystem: "NUCLINO",
         createdAt: new Date(),
       });
 
@@ -1530,8 +1482,121 @@ export async function registerRoutes(
     }
   });
 
+  // PRD-052: OneNote Import - parse .docx export(s) into the same import plan
+  // shape the Nuclino pipeline uses. Accepts a single .docx or a zip of .docx
+  // files (OneNote desktop: File → Export → Word Document, per page/section).
+  app.post("/api/teams/:teamId/imports/onenote/parse", isAuthenticated, upload.single("zipFile"), async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: "No file provided" });
+      }
+
+      const { convertDocxEntriesToPages } = await import("./onenote-import");
+
+      // Collect .docx buffers: either the upload IS one, or it's a zip of them
+      const originalName: string = req.file.originalname || "upload";
+      let docxEntries: Array<{ filename: string; buffer: Buffer; lastModified?: Date }> = [];
+
+      if (originalName.toLowerCase().endsWith(".docx")) {
+        docxEntries = [{ filename: originalName, buffer: req.file.buffer }];
+      } else {
+        try {
+          const zip = new AdmZip(req.file.buffer);
+          docxEntries = zip
+            .getEntries()
+            .filter((entry) => !entry.isDirectory && entry.entryName.toLowerCase().endsWith(".docx"))
+            // OneNote/macOS zips can include resource-fork junk under __MACOSX
+            .filter((entry) => !entry.entryName.startsWith("__MACOSX/"))
+            .map((entry) => ({
+              filename: entry.entryName,
+              buffer: entry.getData(),
+              lastModified: entry.header.time ? new Date(entry.header.time) : undefined,
+            }));
+        } catch {
+          return res.status(400).json({ message: "Upload a OneNote Word export (.docx) or a zip of .docx files" });
+        }
+      }
+
+      if (docxEntries.length === 0) {
+        return res.status(400).json({ message: "No .docx files found. In OneNote desktop use File → Export → Word Document." });
+      }
+
+      const { pages: convertedEntries, warnings } = await convertDocxEntriesToPages(docxEntries);
+      if (convertedEntries.length === 0) {
+        return res.status(400).json({
+          message: "None of the files could be read as Word documents",
+          warnings,
+        });
+      }
+
+      // PRD-040: Fetch team member character names for PC detection
+      const teamMembers = await storage.getTeamMembers(teamId);
+      const detectedPCNames = teamMembers
+        .map(m => m.characterName)
+        .filter((name): name is string => !!name);
+      const partyMemberNames = new Set(detectedPCNames.map(n => n.toLowerCase()));
+
+      // The converted entries are Nuclino-shaped — the whole pipeline reuses
+      const { pages, collections, classifications, summary } = processNuclinoExport(convertedEntries, partyMemberNames);
+      const linkStats = summarizeNuclinoLinks(pages);
+
+      const importPlanId = `${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      importPlanCache.set(importPlanId, {
+        teamId,
+        pages,
+        collections,
+        classifications,
+        summary,
+        sourceSystem: "ONENOTE",
+        createdAt: new Date(),
+      });
+
+      const pagesList = pages.map(page => {
+        const classification = classifications.get(page.sourcePageId);
+        return {
+          sourcePageId: page.sourcePageId,
+          title: page.title,
+          noteType: classification?.noteType || "note",
+          questStatus: classification?.questStatus,
+          isEmpty: page.isEmpty,
+        };
+      });
+
+      res.json({
+        importPlanId,
+        summary,
+        linkStats,
+        pages: pagesList,
+        detectedPCNames,
+        warnings,
+      });
+    } catch (error) {
+      console.error("Error parsing OneNote export:", error);
+      res.status(500).json({ message: "Failed to parse OneNote export" });
+    }
+  });
+
   // PRD-015: Nuclino Import - Commit import plan (updated for PRD-015A, PRD-030)
   app.post("/api/teams/:teamId/imports/nuclino/commit", isAuthenticated, async (req: any, res) => {
+    // P2-4 F51: track the active run and partial stats outside the try block so
+    // a mid-run crash records a truthful "failed" run instead of a phantom success.
+    let activeImportRun: ImportRun | null = null;
+    let totalPagesDetected = 0;
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let linksResolved = 0;
+    let emptyPagesImported = 0;
+    const warnings: string[] = [];
     try {
       const userId = req.user.claims.sub;
       const { teamId } = req.params;
@@ -1561,25 +1626,17 @@ export async function registerRoutes(
         }
       }
 
-      // PRD-042: Support granular empty page exclusion with backward compatibility
-      let excludedEmptyPageIds: Set<string>;
-      let importEmptyPages: boolean;
-
-      if (options?.excludedEmptyPageIds && Array.isArray(options.excludedEmptyPageIds)) {
-        // New format: explicit list of empty page IDs to exclude
-        excludedEmptyPageIds = new Set(options.excludedEmptyPageIds);
-        // Derive importEmptyPages for record-keeping: true if no pages are excluded
-        importEmptyPages = excludedEmptyPageIds.size === 0;
-      } else {
-        // Legacy format: boolean importEmptyPages (defaults to true)
-        importEmptyPages = options?.importEmptyPages !== false;
-        excludedEmptyPageIds = importEmptyPages
-          ? new Set()
-          : new Set(plan.pages.filter(p => p.isEmpty).map(p => p.sourcePageId));
-      }
+      // PRD-042 / P2-4 F50: Support granular empty page exclusion with backward
+      // compatibility. importEmptyPages is true only when zero empty pages were
+      // actually excluded (see resolveEmptyPageSelection).
+      const { excludedEmptyPageIds, importEmptyPages } = resolveEmptyPageSelection(
+        plan.pages,
+        options,
+      );
       const defaultVisibility: ImportVisibility = options?.defaultVisibility || "private";
       const isPrivate = defaultVisibility === "private";
-      const pagesToImport = plan.pages.filter(p => !p.isEmpty || !excludedEmptyPageIds.has(p.sourcePageId));
+      const pagesToImport = filterPagesToImport(plan.pages, excludedEmptyPageIds);
+      totalPagesDetected = plan.summary.totalPages;
 
       // PRD-035: Use client-provided operation ID or generate one for progress tracking
       const commitOperationId = req.body.operationId || `commit-${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1598,27 +1655,28 @@ export async function registerRoutes(
         }
       }
 
+      // PRD-052: the commit pipeline is source-agnostic — the plan carries it
+      const sourceSystem = plan.sourceSystem ?? "NUCLINO";
+
       // PRD-015A: Create import run record FIRST
+      // P2-4 F51: the run starts "pending" and only becomes "completed" after
+      // all note-writing work has actually finished.
       const importRun = await storage.createImportRun({
         teamId,
-        sourceSystem: "NUCLINO",
+        sourceSystem,
         createdByUserId: userId,
-        status: "completed",
+        status: "pending",
         options: {
           importEmptyPages,
           defaultVisibility,
         },
         stats: null, // Will update at end
       });
+      activeImportRun = importRun;
 
       // First pass: Create all notes to get their IDs
       const sourcePageIdToNoteId = new Map<string, string>();
       const noteTypeByNoteId = new Map<string, NoteType>();
-      let created = 0;
-      let updated = 0;
-      let skipped = 0;
-      let linksResolved = 0;
-      const warnings: string[] = [];
 
       // PRD-035: Initialize progress for creating phase
       updateImportProgress(commitOperationId, 'creating', 0, totalPages, 'Starting import...');
@@ -1650,7 +1708,7 @@ export async function registerRoutes(
 
         try {
           // PRD-015A: Check if existing note for snapshot
-          const existingNote = await storage.findNoteBySourceId(teamId, "NUCLINO", page.sourcePageId);
+          const existingNote = await storage.findNoteBySourceId(teamId, sourceSystem, page.sourcePageId);
 
           if (existingNote) {
             // PRD-015A FR-6: Create snapshot before updating
@@ -1691,7 +1749,7 @@ export async function registerRoutes(
               content: page.content,
               noteType,
               questStatus: questStatus ?? null,
-              sourceSystem: "NUCLINO",
+              sourceSystem,
               sourcePageId: page.sourcePageId,
               contentMarkdown: page.contentRaw,
               contentMarkdownResolved: page.content,
@@ -1704,6 +1762,11 @@ export async function registerRoutes(
             sourcePageIdToNoteId.set(page.sourcePageId, newNote.id);
             noteTypeByNoteId.set(newNote.id, noteType);
             created++;
+          }
+
+          // P2-4 F50: count empty pages that were ACTUALLY imported
+          if (page.isEmpty) {
+            emptyPagesImported++;
           }
         } catch (err) {
           console.error(`Error importing page ${page.title}:`, err);
@@ -1752,16 +1815,23 @@ export async function registerRoutes(
                 null,
               );
 
+              // PRD-050 FR-3: snippet is the markdown line containing the link.
+              const evidenceSnippet = (link.lineSnippet || link.text).slice(0, 500);
+
               if (ENABLE_NUCLINO_LINK_EVIDENCE) {
                 const fromType = noteTypeByNoteId.get(noteId) || "note";
                 const toType = noteTypeByNoteId.get(targetNoteId) || "note";
                 const inferred = inferRelationshipTypeForNoteTypes(fromType, toType);
+                // Honor the canonical direction (e.g. NPC page linking a Quest
+                // stores QuestHasNPC from the quest to the NPC).
+                const relationshipFromNoteId = inferred.swap ? targetNoteId : noteId;
+                const relationshipToNoteId = inferred.swap ? noteId : targetNoteId;
 
                 const existingRelationships = await storage.getRelationshipsForNote(noteId);
                 const existingRelationship = existingRelationships.find(
                   (relationship) =>
-                    relationship.fromNoteId === noteId &&
-                    relationship.toNoteId === targetNoteId &&
+                    relationship.fromNoteId === relationshipFromNoteId &&
+                    relationship.toNoteId === relationshipToNoteId &&
                     relationship.relationshipType === inferred.relationshipType &&
                     relationship.sourceNoteId === noteId &&
                     (relationship.sourceBlockId || "") === sourceBlockId,
@@ -1770,14 +1840,14 @@ export async function registerRoutes(
                 if (!existingRelationship) {
                   await storage.createNoteRelationship({
                     enrichmentRunId: null,
-                    fromNoteId: noteId,
-                    toNoteId: targetNoteId,
+                    fromNoteId: relationshipFromNoteId,
+                    toNoteId: relationshipToNoteId,
                     createdByUserId: userId,
                     sourceNoteId: noteId,
                     sourceBlockId,
                     relationshipType: inferred.relationshipType,
-                    confidence: 0.92,
-                    evidenceSnippet: link.text.slice(0, 500),
+                    confidence: NUCLINO_LINK_EVIDENCE_CONFIDENCE,
+                    evidenceSnippet,
                     evidenceType: "Link",
                     status: "approved",
                     approvedByUserId: userId,
@@ -1794,9 +1864,9 @@ export async function registerRoutes(
                 if (existingBacklink) {
                   await storage.updateBacklink(existingBacklink.id, {
                     sourceBlockId,
-                    textSnippet: link.text.slice(0, 500),
+                    textSnippet: evidenceSnippet,
                     evidenceType: "Link",
-                    confidence: 0.92,
+                    confidence: NUCLINO_LINK_EVIDENCE_CONFIDENCE,
                   });
                 } else {
                   await storage.createBacklink({
@@ -1804,9 +1874,9 @@ export async function registerRoutes(
                     sourceBlockId,
                     targetNoteId,
                     createdByUserId: userId,
-                    textSnippet: link.text.slice(0, 500),
+                    textSnippet: evidenceSnippet,
                     evidenceType: "Link",
-                    confidence: 0.92,
+                    confidence: NUCLINO_LINK_EVIDENCE_CONFIDENCE,
                   });
                 }
               }
@@ -1829,11 +1899,17 @@ export async function registerRoutes(
         notesCreated: created,
         notesUpdated: updated,
         notesSkipped: skipped,
-        emptyPagesImported: importEmptyPages ? plan.summary.emptyPages : 0,
+        // P2-4 F50: number of actually imported pages that were empty
+        // (supports PRD-042 partial empty-page selection)
+        emptyPagesImported,
         linksResolved,
         warningsCount: warnings.length,
       };
-      await storage.updateImportRun(importRun.id, { stats });
+      // P2-4 F51: note-writing work finished — the run is truthfully complete
+      await completeImportRun(storage, importRun.id, stats);
+      // Post-completion work (enrichment bookkeeping) must not flip the run to
+      // "failed": the notes are already written.
+      activeImportRun = null;
 
       // PRD-030: If using AI classifications, create enrichment run and store results
       let enrichmentRunId: string | null = null;
@@ -1935,6 +2011,19 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Error committing Nuclino import:", error);
+      // P2-4 F51: a crash mid-import must not leave a phantom "completed" (or
+      // stuck "pending") run — record it as failed with whatever stats we have.
+      if (activeImportRun) {
+        await markImportRunFailed(storage, activeImportRun.id, {
+          totalPagesDetected,
+          notesCreated: created,
+          notesUpdated: updated,
+          notesSkipped: skipped,
+          emptyPagesImported,
+          linksResolved,
+          warningsCount: warnings.length,
+        });
+      }
       res.status(500).json({ message: "Failed to commit import" });
     }
   });
@@ -2299,6 +2388,11 @@ export async function registerRoutes(
       // Get notes created by this import
       const notes = await storage.getNotesByImportRun(importId);
 
+      // P2-4 F49: snapshots identify pre-existing notes this run updated
+      // (vs. notes it created), so View Details can distinguish them.
+      const snapshots = await storage.getSnapshotsByImportRun(importId);
+      const updatedNoteIds = new Set(snapshots.map(s => s.noteId));
+
       // Get importer name
       const user = await storage.getUser(importRun.createdByUserId);
 
@@ -2307,7 +2401,12 @@ export async function registerRoutes(
         importerName: user
           ? `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email
           : "Unknown",
-        notes: notes.map(n => ({ id: n.id, title: n.title, noteType: n.noteType })),
+        notes: notes.map(n => ({
+          id: n.id,
+          title: n.title,
+          noteType: n.noteType,
+          wasUpdated: updatedNoteIds.has(n.id),
+        })),
       });
     } catch (error) {
       console.error("Error fetching import run:", error);
@@ -2514,39 +2613,34 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Not a team member" });
       }
 
-      // Get classification to verify team ownership
-      const classifications = await Promise.all(
-        (await storage.getNoteClassificationsByEnrichmentRun("")).map(async (c) => {
-          const enrichmentRun = await storage.getEnrichmentRun(c.enrichmentRunId);
-          return { ...c, teamId: enrichmentRun?.teamId };
-        })
+      // Get classification to verify team ownership (via this team's enrichment runs)
+      const allEnrichmentRuns = await Promise.all(
+        (await storage.getImportRuns(teamId)).map((ir) =>
+          storage.getEnrichmentRunByImportId(ir.id)
+        )
       );
 
-      const classification = classifications.find(
-        (c) => c.id === classificationId && c.teamId === teamId
-      );
+      type StoredClassification = Awaited<ReturnType<typeof storage.getNoteClassificationsByEnrichmentRun>>[number];
+      let classification: StoredClassification | undefined;
+      for (const er of allEnrichmentRuns) {
+        if (!er) continue;
+        const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
+        const match = erClassifications.find((c) => c.id === classificationId);
+        if (match) {
+          classification = match;
+          break;
+        }
+      }
 
       if (!classification) {
-        // Try to get it directly by looking up the note
-        const allEnrichmentRuns = await Promise.all(
-          (await storage.getImportRuns(teamId)).map((ir) =>
-            storage.getEnrichmentRunByImportId(ir.id)
-          )
-        );
+        return res.status(404).json({ message: "Classification not found" });
+      }
 
-        let found = false;
-        for (const er of allEnrichmentRuns) {
-          if (!er) continue;
-          const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
-          if (erClassifications.some((c) => c.id === classificationId)) {
-            found = true;
-            break;
-          }
-        }
-
-        if (!found) {
-          return res.status(404).json({ message: "Classification not found" });
-        }
+      // P0-1 (F81): members must not approve/reject/reclassify classifications
+      // belonging to another author's private note. 404 to avoid confirming existence.
+      const classifiedNote = await storage.getNote(classification.noteId);
+      if (!classifiedNote || classifiedNote.teamId !== teamId || !canViewNote(classifiedNote, userId, member.role)) {
+        return res.status(404).json({ message: "Classification not found" });
       }
 
       const updated = await storage.updateNoteClassificationStatus(classificationId, status, userId);
@@ -2798,119 +2892,12 @@ export async function registerRoutes(
   });
 
   // Get sessions
-  app.get("/api/teams/:teamId/sessions", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const sessions = await storage.getSessions(teamId);
-      res.json(sessions);
-    } catch (error) {
-      console.error("Error fetching sessions:", error);
-      res.status(500).json({ message: "Failed to fetch sessions" });
-    }
-  });
-
-  // Create session
-  app.post("/api/teams/:teamId/sessions", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized" });
-      }
-
-      const session = await storage.createSession({
-        teamId,
-        ...req.body,
-      });
-      
-      res.json(session);
-    } catch (error) {
-      console.error("Error creating session:", error);
-      res.status(500).json({ message: "Failed to create session" });
-    }
-  });
-
-  // Update session status (PRD-010)
-  app.patch("/api/teams/:teamId/sessions/:sessionId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, sessionId } = req.params;
-      const { status } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized - DM only" });
-      }
-
-      const session = await storage.getSession(sessionId);
-      if (!session || session.teamId !== teamId) {
-        return res.status(404).json({ message: "Session not found" });
-      }
-
-      if (!["scheduled", "canceled"].includes(status)) {
-        return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
-      }
-
-      const updated = await storage.updateSession(sessionId, { status });
-      res.json(updated);
-    } catch (error) {
-      console.error("Error updating session:", error);
-      res.status(500).json({ message: "Failed to update session" });
-    }
-  });
-
-  // Get availability
-  app.get("/api/teams/:teamId/availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const avail = await storage.getAvailability(teamId);
-      res.json(avail);
-    } catch (error) {
-      console.error("Error fetching availability:", error);
-      res.status(500).json({ message: "Failed to fetch availability" });
-    }
-  });
-
-  // Update availability
-  app.post("/api/teams/:teamId/sessions/:sessionId/availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, sessionId } = req.params;
-      const { status } = req.body;
-      
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const avail = await storage.upsertAvailability({
-        sessionId,
-        userId,
-        status: status as AvailabilityStatus,
-      });
-      
-      res.json(avail);
-    } catch (error) {
-      console.error("Error updating availability:", error);
-      res.status(500).json({ message: "Failed to update availability" });
-    }
-  });
+  // Scheduling routes: shared handlers registered by BOTH routers (audit S8)
+  app.get("/api/teams/:teamId/sessions", isAuthenticated, makeGetSessionsHandler(storage));
+  app.post("/api/teams/:teamId/sessions", isAuthenticated, makeCreateSessionHandler(storage));
+  app.patch("/api/teams/:teamId/sessions/:sessionId", isAuthenticated, makeUpdateSessionStatusHandler(storage));
+  app.get("/api/teams/:teamId/availability", isAuthenticated, makeGetLegacyAvailabilityHandler(storage));
+  app.post("/api/teams/:teamId/sessions/:sessionId/availability", isAuthenticated, makeUpsertLegacyAvailabilityHandler(storage));
 
   // Get dice rolls
   app.get("/api/teams/:teamId/dice-rolls", isAuthenticated, async (req: any, res) => {
@@ -3007,232 +2994,59 @@ export async function registerRoutes(
     }
   });
 
-  // User Availability (PRD-009) - date-based personal availability
-  app.get("/api/teams/:teamId/user-availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { startDate, endDate } = req.query;
+  // User Availability (PRD-009) + Session Candidates/Overrides (PRD-010A):
+  // shared handlers registered by BOTH routers (audit S8), with ownership and
+  // team-scope guards (audit S6)
+  app.get("/api/teams/:teamId/user-availability", isAuthenticated, makeGetUserAvailabilityHandler(storage));
+  app.post("/api/teams/:teamId/user-availability", isAuthenticated, makeCreateUserAvailabilityHandler(storage));
+  app.patch("/api/teams/:teamId/user-availability/:id", isAuthenticated, makeUpdateUserAvailabilityHandler(storage));
+  app.delete("/api/teams/:teamId/user-availability/:id", isAuthenticated, makeDeleteUserAvailabilityHandler(storage));
+  app.get("/api/teams/:teamId/session-candidates", isAuthenticated, makeSessionCandidatesHandler(storage));
+  app.post("/api/teams/:teamId/session-overrides", isAuthenticated, makeUpsertSessionOverrideHandler(storage));
+  app.get("/api/teams/:teamId/session-overrides", isAuthenticated, makeGetSessionOverridesHandler(storage));
+  app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, makeDeleteSessionOverrideHandler(storage));
 
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
+  // Session recordings (PRD-053): Craig multitrack audio → transcript + log
+  app.get("/api/session-recordings/config", isAuthenticated, makeSessionRecordingConfigHandler());
+  app.post(
+    "/api/teams/:teamId/session-recordings",
+    isAuthenticated,
+    sessionAudioUpload.single("recording"),
+    makeSessionRecordingUploadHandler(storage)
+  );
+  app.get(
+    "/api/teams/:teamId/session-recordings/:operationId/status",
+    isAuthenticated,
+    makeSessionRecordingStatusHandler(storage)
+  );
 
-      if (!startDate || !endDate) {
-        return res.status(400).json({ message: "startDate and endDate query parameters are required" });
-      }
+  // Push + notifications (scheduling audit stage 3)
+  app.get("/api/push/public-key", isAuthenticated, makePushPublicKeyHandler());
+  app.post("/api/push/subscriptions", isAuthenticated, makeSavePushSubscriptionHandler(storage));
+  app.delete("/api/push/subscriptions", isAuthenticated, makeDeletePushSubscriptionHandler(storage));
+  app.get("/api/notifications", isAuthenticated, makeListNotificationsHandler(storage));
+  app.post("/api/notifications/mark-read", isAuthenticated, makeMarkNotificationsReadHandler(storage));
+  app.patch("/api/teams/:teamId/members/me/notification-prefs", isAuthenticated, makeUpdateNotificationPrefsHandler(storage));
 
-      const availability = await storage.getUserAvailability(
-        teamId,
-        new Date(startDate as string),
-        new Date(endDate as string)
-      );
-      res.json(availability);
-    } catch (error) {
-      console.error("Error fetching user availability:", error);
-      res.status(500).json({ message: "Failed to fetch user availability" });
+  // Scheduling audit stage 4: external-cron hook for hosts whose process
+  // sleeps (autoscale). Guarded by a shared-secret header; 404 when unset so
+  // the route is invisible unless deliberately configured. The sweep is
+  // idempotent, so overlapping triggers are harmless.
+  app.post("/api/jobs/reminder-sweep", async (req, res) => {
+    const token = process.env.REMINDER_CRON_TOKEN;
+    if (!token) {
+      return res.status(404).json({ message: "Not found" });
     }
-  });
-
-  app.post("/api/teams/:teamId/user-availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { date, startTime, endTime } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      // Validate time format (HH:MM)
-      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
-      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
-        return res.status(400).json({ message: "Invalid time format. Use HH:MM" });
-      }
-
-      // Check for existing availability on this date
-      const existingAvailability = await storage.getUserAvailabilityByDate(teamId, userId, new Date(date));
-      if (existingAvailability) {
-        return res.status(409).json({ message: "Availability already exists for this date. Use PATCH to update." });
-      }
-
-      const availability = await storage.createUserAvailability({
-        teamId,
-        userId,
-        date: new Date(date),
-        startTime,
-        endTime,
-      });
-
-      res.json(availability);
-    } catch (error) {
-      console.error("Error creating user availability:", error);
-      res.status(500).json({ message: "Failed to create user availability" });
+    if (req.headers["x-cron-token"] !== token) {
+      return res.status(403).json({ message: "Forbidden" });
     }
-  });
-
-  app.patch("/api/teams/:teamId/user-availability/:id", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.user.claims.sub;
-      const { teamId, id } = req.params;
-      const { startTime, endTime } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      // Validate time format if provided
-      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
-      if (startTime && !timeRegex.test(startTime)) {
-        return res.status(400).json({ message: "Invalid startTime format. Use HH:MM" });
-      }
-      if (endTime && !timeRegex.test(endTime)) {
-        return res.status(400).json({ message: "Invalid endTime format. Use HH:MM" });
-      }
-
-      const updateData: { startTime?: string; endTime?: string } = {};
-      if (startTime) updateData.startTime = startTime;
-      if (endTime) updateData.endTime = endTime;
-
-      const availability = await storage.updateUserAvailability(id, updateData);
-      res.json(availability);
+      const { runReminderSweep } = await import("./jobs/reminder-engine");
+      const summary = await runReminderSweep(storage);
+      res.json(summary);
     } catch (error) {
-      console.error("Error updating user availability:", error);
-      res.status(500).json({ message: "Failed to update user availability" });
-    }
-  });
-
-  app.delete("/api/teams/:teamId/user-availability/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, id } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      await storage.deleteUserAvailability(id);
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error deleting user availability:", error);
-      res.status(500).json({ message: "Failed to delete user availability" });
-    }
-  });
-
-  // Session Candidates (PRD-010A) - auto-generated sessions from recurrence
-  app.get("/api/teams/:teamId/session-candidates", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { startDate, endDate } = req.query;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      if (!startDate || !endDate) {
-        return res.status(400).json({ message: "startDate and endDate query parameters are required" });
-      }
-
-      const team = await storage.getTeam(teamId);
-      if (!team) {
-        return res.status(404).json({ message: "Team not found" });
-      }
-
-      // Get any overrides for this team
-      const overrides = await storage.getSessionOverrides(teamId);
-
-      // Generate candidates from recurrence settings
-      const candidates = generateSessionCandidates(
-        team,
-        new Date(startDate as string),
-        new Date(endDate as string),
-        overrides
-      );
-
-      res.json({ candidates, overrides });
-    } catch (error) {
-      console.error("Error fetching session candidates:", error);
-      res.status(500).json({ message: "Failed to fetch session candidates" });
-    }
-  });
-
-  // Session Overrides (PRD-010A) - DM overrides for auto-generated sessions
-  app.post("/api/teams/:teamId/session-overrides", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { occurrenceKey, status, scheduledAtOverride } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized - DM only" });
-      }
-
-      if (!occurrenceKey) {
-        return res.status(400).json({ message: "occurrenceKey is required" });
-      }
-
-      // Validate status if provided
-      if (status && !SESSION_STATUSES.includes(status as SessionStatus)) {
-        return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
-      }
-
-      const override = await storage.upsertSessionOverride({
-        teamId,
-        occurrenceKey,
-        status: status || "scheduled",
-        scheduledAtOverride: scheduledAtOverride ? new Date(scheduledAtOverride) : null,
-        updatedBy: userId,
-      });
-
-      res.json(override);
-    } catch (error) {
-      console.error("Error creating session override:", error);
-      res.status(500).json({ message: "Failed to create session override" });
-    }
-  });
-
-  // Get session overrides for a team (PRD-010A)
-  app.get("/api/teams/:teamId/session-overrides", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const overrides = await storage.getSessionOverrides(teamId);
-      res.json(overrides);
-    } catch (error) {
-      console.error("Error fetching session overrides:", error);
-      res.status(500).json({ message: "Failed to fetch session overrides" });
-    }
-  });
-
-  // Delete session override (PRD-010A) - reinstates the session to default behavior
-  app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, id } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized - DM only" });
-      }
-
-      await storage.deleteSessionOverride(id);
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error deleting session override:", error);
-      res.status(500).json({ message: "Failed to delete session override" });
+      console.error("Manual reminder sweep failed:", error);
+      res.status(500).json({ message: "Sweep failed" });
     }
   });
 

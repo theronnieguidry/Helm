@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import NotificationSettingsCard from "@/components/notification-settings-card";
+import { TimezoneSelect } from "@/components/timezone-select";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -172,6 +174,10 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
     daysOfMonth: team.daysOfMonth || [],
     startTime: team.startTime || "19:00",
     timezone: team.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    // Audit S14: biweekly needs an anchor week; previously unsettable from the UI
+    recurrenceAnchorDate: team.recurrenceAnchorDate
+      ? new Date(team.recurrenceAnchorDate).toISOString().slice(0, 10)
+      : "",
     minAttendanceThreshold: team.minAttendanceThreshold || 2,
     defaultSessionDurationMinutes: team.defaultSessionDurationMinutes || 180,
     diceMode: team.diceMode,
@@ -223,6 +229,10 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
           daysOfMonth: data.recurrenceFrequency === "monthly" ? data.daysOfMonth : null,
           startTime: data.startTime,
           timezone: data.timezone,
+          recurrenceAnchorDate:
+            data.recurrenceFrequency === "biweekly" && data.recurrenceAnchorDate
+              ? new Date(`${data.recurrenceAnchorDate}T12:00:00Z`).toISOString()
+              : null,
           minAttendanceThreshold: data.minAttendanceThreshold,
           defaultSessionDurationMinutes: data.defaultSessionDurationMinutes,
           diceMode: data.diceMode,
@@ -382,6 +392,9 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
               </div>
             </CardContent>
           </Card>
+
+          {/* Scheduling audit stage 3: session reminders + push */}
+          <NotificationSettingsCard team={team} currentMember={currentMember} />
         </div>
       </div>
     );
@@ -493,6 +506,23 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
               </div>
             )}
 
+            {formData.recurrenceFrequency === "biweekly" && (
+              <div className="space-y-2">
+                <Label htmlFor="anchorDate">First Session Week</Label>
+                <p className="text-sm text-muted-foreground">
+                  Pick any date in an "on" week — sessions repeat every other week from there
+                </p>
+                <Input
+                  id="anchorDate"
+                  type="date"
+                  value={formData.recurrenceAnchorDate}
+                  onChange={(e) => setFormData({ ...formData, recurrenceAnchorDate: e.target.value })}
+                  className="w-[200px]"
+                  data-testid="input-anchor-date"
+                />
+              </div>
+            )}
+
             {formData.recurrenceFrequency === "monthly" && (
               <div className="space-y-2">
                 <Label>Days of Month</Label>
@@ -529,10 +559,11 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
               </div>
               <div className="space-y-2">
                 <Label htmlFor="timezone">Timezone</Label>
-                <Input
-                  id="timezone"
+                {/* Audit S14: was a free-text input — any typo silently broke
+                    every time computation for the team */}
+                <TimezoneSelect
                   value={formData.timezone}
-                  onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
+                  onValueChange={(value) => setFormData({ ...formData, timezone: value })}
                   data-testid="input-timezone"
                 />
               </div>
@@ -660,6 +691,9 @@ export default function SettingsPage({ team, onTeamUpdate }: SettingsPageProps) 
             </div>
           </CardContent>
         </Card>
+
+        {/* Scheduling audit stage 3: session reminders + push */}
+        <NotificationSettingsCard team={team} currentMember={currentMember} />
 
         <div className="flex items-center justify-between pt-4">
           <Button

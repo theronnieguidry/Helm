@@ -8,7 +8,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['**/*.test.ts', '**/*.test.tsx', '**/*.spec.ts'],
-    exclude: ['node_modules', 'dist', '.cache'],
+    exclude: ['node_modules', 'dist', '.cache', 'e2e/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

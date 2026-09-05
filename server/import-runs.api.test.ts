@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryStorage } from "./test/memory-storage";
-import type { User, Team, TeamMember, Note } from "@shared/schema";
+import type { User, Team, TeamMember, Note, ImportRunStats } from "@shared/schema";
+import {
+  resolveEmptyPageSelection,
+  filterPagesToImport,
+  completeImportRun,
+  markImportRunFailed,
+} from "./import-run-helpers";
 
 describe("Import Runs API (PRD-015A)", () => {
   let storage: MemoryStorage;
@@ -763,6 +769,141 @@ describe("Import Runs API (PRD-015A)", () => {
         expect(result.map(p => p.sourcePageId)).toEqual([
           "page-1", "page-2", "empty-2", "empty-3"
         ]);
+      });
+    });
+  });
+
+  describe("Import-run truthfulness (P2-4)", () => {
+    const partialStats: ImportRunStats = {
+      totalPagesDetected: 10,
+      notesCreated: 4,
+      notesUpdated: 1,
+      notesSkipped: 0,
+      emptyPagesImported: 1,
+      linksResolved: 0,
+      warningsCount: 2,
+    };
+
+    describe("F51: run status lifecycle", () => {
+      it("supports the pending -> completed lifecycle", async () => {
+        // Run is created "pending" before any note is written
+        const run = await storage.createImportRun({
+          teamId: testTeam.id,
+          sourceSystem: "NUCLINO",
+          createdByUserId: testUser.id,
+          status: "pending",
+          options: { importEmptyPages: true, defaultVisibility: "private" },
+          stats: null,
+        });
+        expect(run.status).toBe("pending");
+        expect(run.stats).toBeNull();
+
+        // ...note-writing work happens...
+
+        const completed = await completeImportRun(storage, run.id, partialStats);
+        expect(completed.status).toBe("completed");
+        expect(completed.stats).toEqual(partialStats);
+
+        const fetched = await storage.getImportRun(run.id);
+        expect(fetched?.status).toBe("completed");
+      });
+
+      it("marks the run failed with partial stats when note writing throws", async () => {
+        const run = await storage.createImportRun({
+          teamId: testTeam.id,
+          sourceSystem: "NUCLINO",
+          createdByUserId: testUser.id,
+          status: "pending",
+          options: { importEmptyPages: true, defaultVisibility: "private" },
+          stats: null,
+        });
+
+        // Simulate the commit endpoint's error path: note-writing work throws
+        // mid-run after some stats have been gathered.
+        let notesCreated = 0;
+        const doImportWork = async () => {
+          notesCreated++;
+          throw new Error("database exploded mid-import");
+        };
+
+        await expect(doImportWork()).rejects.toThrow("database exploded mid-import");
+        await markImportRunFailed(storage, run.id, {
+          ...partialStats,
+          notesCreated,
+        });
+
+        const fetched = await storage.getImportRun(run.id);
+        expect(fetched?.status).toBe("failed");
+        // Partial stats gathered before the crash are preserved
+        expect(fetched?.stats?.notesCreated).toBe(1);
+        expect(fetched?.stats?.totalPagesDetected).toBe(10);
+      });
+
+      it("markImportRunFailed never throws, even when the storage update fails", async () => {
+        // Unknown run id -> MemoryStorage.updateImportRun throws internally
+        await expect(
+          markImportRunFailed(storage, "nonexistent-run-id", partialStats)
+        ).resolves.toBeUndefined();
+      });
+    });
+
+    describe("F50: empty-page stats for partial selection", () => {
+      const pages = [
+        { sourcePageId: "page-1", isEmpty: false },
+        { sourcePageId: "page-2", isEmpty: false },
+        { sourcePageId: "empty-1", isEmpty: true },
+        { sourcePageId: "empty-2", isEmpty: true },
+        { sourcePageId: "empty-3", isEmpty: true },
+      ];
+
+      it("records importEmptyPages=false and the true imported-empty count for partial selection", () => {
+        const { excludedEmptyPageIds, importEmptyPages } = resolveEmptyPageSelection(pages, {
+          excludedEmptyPageIds: ["empty-2"],
+        });
+
+        // One empty page was excluded, so options must not claim all were imported
+        expect(importEmptyPages).toBe(false);
+
+        // The pages that actually get imported include 2 of the 3 empty pages
+        const pagesToImport = filterPagesToImport(pages, excludedEmptyPageIds);
+        const emptyPagesImported = pagesToImport.filter(p => p.isEmpty).length;
+        expect(emptyPagesImported).toBe(2);
+        expect(pagesToImport.map(p => p.sourcePageId)).toEqual([
+          "page-1", "page-2", "empty-1", "empty-3",
+        ]);
+      });
+
+      it("records importEmptyPages=true when the exclusion list is empty", () => {
+        const { excludedEmptyPageIds, importEmptyPages } = resolveEmptyPageSelection(pages, {
+          excludedEmptyPageIds: [],
+        });
+        expect(importEmptyPages).toBe(true);
+        const pagesToImport = filterPagesToImport(pages, excludedEmptyPageIds);
+        expect(pagesToImport.filter(p => p.isEmpty).length).toBe(3);
+      });
+
+      it("ignores excluded ids that do not match an actual empty page", () => {
+        const { importEmptyPages } = resolveEmptyPageSelection(pages, {
+          excludedEmptyPageIds: ["nonexistent-id", "page-1"],
+        });
+        // No real empty page was excluded, so importEmptyPages stays true
+        expect(importEmptyPages).toBe(true);
+      });
+
+      it("supports the legacy importEmptyPages=false boolean (all empties excluded)", () => {
+        const { excludedEmptyPageIds, importEmptyPages } = resolveEmptyPageSelection(pages, {
+          importEmptyPages: false,
+        });
+        expect(importEmptyPages).toBe(false);
+        const pagesToImport = filterPagesToImport(pages, excludedEmptyPageIds);
+        expect(pagesToImport.filter(p => p.isEmpty).length).toBe(0);
+        expect(pagesToImport.length).toBe(2);
+      });
+
+      it("defaults to importing all empty pages when options are omitted", () => {
+        const { excludedEmptyPageIds, importEmptyPages } = resolveEmptyPageSelection(pages);
+        expect(importEmptyPages).toBe(true);
+        expect(filterPagesToImport(pages, excludedEmptyPageIds).length).toBe(5);
       });
     });
   });

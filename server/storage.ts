@@ -9,6 +9,8 @@ import {
   backlinks, Backlink, InsertBacklink,
   userAvailability, UserAvailability, InsertUserAvailability,
   sessionOverrides, SessionOverride, InsertSessionOverride,
+  pushSubscriptions, PushSubscription, InsertPushSubscription,
+  notifications, Notification, InsertNotification,
   importRuns, ImportRun, InsertImportRun, ImportRunStatus,
   noteImportSnapshots, NoteImportSnapshot, InsertNoteImportSnapshot,
   // PRD-016: AI Enrichment
@@ -21,6 +23,7 @@ import {
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, desc, gte, lte, lt, sql, inArray, count as drizzleCount } from "drizzle-orm";
+import { normalizeAvailabilityDate } from "@shared/scheduling";
 
 import type { User } from "@shared/schema";
 
@@ -56,8 +59,8 @@ export interface IStorage {
   updateNote(id: string, data: Partial<InsertNote>): Promise<Note>;
   deleteNote(id: string): Promise<void>;
   getSessionLogs(teamId: string): Promise<Note[]>;
-  // PRD-019: Find session by date for today's session editor
-  findSessionByDate(teamId: string, date: Date): Promise<Note | undefined>;
+  // PRD-019: Find session by date for today's session editor (M1: scoped per author)
+  findSessionByDate(teamId: string, date: Date, authorId: string): Promise<Note | undefined>;
   // PRD-015: Import methods
   findNoteBySourceId(teamId: string, sourceSystem: string, sourcePageId: string): Promise<Note | undefined>;
   upsertImportedNote(note: InsertNote): Promise<{ note: Note; created: boolean }>;
@@ -91,6 +94,7 @@ export interface IStorage {
   // User Availability (PRD-009)
   getUserAvailability(teamId: string, startDate: Date, endDate: Date): Promise<UserAvailability[]>;
   getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined>;
+  getUserAvailabilityById(id: string): Promise<UserAvailability | undefined>; // audit S6: ownership checks
   createUserAvailability(data: InsertUserAvailability): Promise<UserAvailability>;
   updateUserAvailability(id: string, data: Partial<InsertUserAvailability>): Promise<UserAvailability>;
   deleteUserAvailability(id: string): Promise<void>;
@@ -98,8 +102,25 @@ export interface IStorage {
   // Session Overrides (PRD-010A)
   getSessionOverrides(teamId: string): Promise<SessionOverride[]>;
   getSessionOverride(teamId: string, occurrenceKey: string): Promise<SessionOverride | undefined>;
+  getSessionOverrideById(id: string): Promise<SessionOverride | undefined>; // audit S6: team-scope checks
   upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride>;
   deleteSessionOverride(id: string): Promise<void>;
+
+  // Push Subscriptions + Notifications (scheduling audit stage 3)
+  upsertPushSubscription(data: InsertPushSubscription): Promise<PushSubscription>;
+  getPushSubscriptionsForUser(userId: string): Promise<PushSubscription[]>;
+  deletePushSubscriptionByEndpoint(endpoint: string): Promise<void>;
+  createNotification(data: InsertNotification): Promise<Notification>;
+  getNotificationByDedupeKey(dedupeKey: string): Promise<Notification | undefined>;
+  getNotificationsForUser(userId: string, limit?: number): Promise<Notification[]>;
+  markNotificationsRead(userId: string, ids?: string[]): Promise<void>;
+  updateNotificationPushSent(id: string, pushSent: boolean): Promise<void>;
+  updateMemberNotificationPrefs(
+    memberId: string,
+    prefs: { notifyAvailabilityReminders?: boolean; notifyGroupAwaiting?: boolean; notifyGameDay?: boolean }
+  ): Promise<TeamMember>;
+  // Stage 4: the reminder engine sweeps every team that has a recurrence
+  listTeamsWithRecurrence(): Promise<Team[]>;
 
   // Import Runs (PRD-015A)
   getImportRuns(teamId: string): Promise<ImportRun[]>;
@@ -366,8 +387,8 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(notes.sessionDate));
   }
 
-  // PRD-019: Find session by date for today's session editor
-  async findSessionByDate(teamId: string, date: Date): Promise<Note | undefined> {
+  // PRD-019: Find session by date for today's session editor (M1: scoped per author)
+  async findSessionByDate(teamId: string, date: Date, authorId: string): Promise<Note | undefined> {
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(date);
@@ -379,6 +400,7 @@ export class DatabaseStorage implements IStorage {
       .where(
         and(
           eq(notes.teamId, teamId),
+          eq(notes.authorId, authorId),
           eq(notes.noteType, "session_log"),
           gte(notes.sessionDate, startOfDay),
           lte(notes.sessionDate, endOfDay)
@@ -580,11 +602,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserAvailabilityByDate(teamId: string, userId: string, date: Date): Promise<UserAvailability | undefined> {
-    // Normalize the date to start of day for comparison
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Audit S5: match by intended calendar day, not server-local day bounds.
+    // Normalized rows sit at UTC midnight; legacy rows were written at the
+    // author's browser-local midnight (within ±12h of it) — a ±12h window
+    // around the normalized midnight catches both, mirroring
+    // availabilityDateKey's rounding.
+    const normalized = normalizeAvailabilityDate(date);
+    const windowStart = new Date(normalized.getTime() - 12 * 60 * 60 * 1000);
+    const windowEnd = new Date(normalized.getTime() + 12 * 60 * 60 * 1000 - 1);
 
     const [result] = await db
       .select()
@@ -593,10 +618,18 @@ export class DatabaseStorage implements IStorage {
         and(
           eq(userAvailability.teamId, teamId),
           eq(userAvailability.userId, userId),
-          gte(userAvailability.date, startOfDay),
-          lte(userAvailability.date, endOfDay)
+          gte(userAvailability.date, windowStart),
+          lte(userAvailability.date, windowEnd)
         )
       );
+    return result;
+  }
+
+  async getUserAvailabilityById(id: string): Promise<UserAvailability | undefined> {
+    const [result] = await db
+      .select()
+      .from(userAvailability)
+      .where(eq(userAvailability.id, id));
     return result;
   }
 
@@ -640,6 +673,14 @@ export class DatabaseStorage implements IStorage {
     return override;
   }
 
+  async getSessionOverrideById(id: string): Promise<SessionOverride | undefined> {
+    const [override] = await db
+      .select()
+      .from(sessionOverrides)
+      .where(eq(sessionOverrides.id, id));
+    return override;
+  }
+
   async upsertSessionOverride(data: InsertSessionOverride): Promise<SessionOverride> {
     // Check if override already exists for this team/occurrenceKey
     const existing = await this.getSessionOverride(data.teamId, data.occurrenceKey);
@@ -664,6 +705,95 @@ export class DatabaseStorage implements IStorage {
 
   async deleteSessionOverride(id: string): Promise<void> {
     await db.delete(sessionOverrides).where(eq(sessionOverrides.id, id));
+  }
+
+  // Push Subscriptions + Notifications (scheduling audit stage 3)
+  async upsertPushSubscription(data: InsertPushSubscription): Promise<PushSubscription> {
+    const [existing] = await db
+      .select()
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.endpoint, data.endpoint));
+
+    if (existing) {
+      const [updated] = await db
+        .update(pushSubscriptions)
+        .set({
+          userId: data.userId,
+          p256dh: data.p256dh,
+          auth: data.auth,
+          userAgent: data.userAgent ?? existing.userAgent,
+          lastSeenAt: new Date(),
+        })
+        .where(eq(pushSubscriptions.id, existing.id))
+        .returning();
+      return updated;
+    }
+
+    const [created] = await db.insert(pushSubscriptions).values(data).returning();
+    return created;
+  }
+
+  async getPushSubscriptionsForUser(userId: string): Promise<PushSubscription[]> {
+    return await db
+      .select()
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.userId, userId));
+  }
+
+  async deletePushSubscriptionByEndpoint(endpoint: string): Promise<void> {
+    await db.delete(pushSubscriptions).where(eq(pushSubscriptions.endpoint, endpoint));
+  }
+
+  async createNotification(data: InsertNotification): Promise<Notification> {
+    const [created] = await db.insert(notifications).values(data).returning();
+    return created;
+  }
+
+  async getNotificationByDedupeKey(dedupeKey: string): Promise<Notification | undefined> {
+    const [result] = await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.dedupeKey, dedupeKey));
+    return result;
+  }
+
+  async getNotificationsForUser(userId: string, limit = 50): Promise<Notification[]> {
+    return await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.userId, userId))
+      .orderBy(desc(notifications.createdAt))
+      .limit(limit);
+  }
+
+  async markNotificationsRead(userId: string, ids?: string[]): Promise<void> {
+    const conditions = ids && ids.length > 0
+      ? and(eq(notifications.userId, userId), inArray(notifications.id, ids))
+      : eq(notifications.userId, userId);
+    await db.update(notifications).set({ readAt: new Date() }).where(conditions);
+  }
+
+  async updateNotificationPushSent(id: string, pushSent: boolean): Promise<void> {
+    await db.update(notifications).set({ pushSent }).where(eq(notifications.id, id));
+  }
+
+  async updateMemberNotificationPrefs(
+    memberId: string,
+    prefs: { notifyAvailabilityReminders?: boolean; notifyGroupAwaiting?: boolean; notifyGameDay?: boolean }
+  ): Promise<TeamMember> {
+    const [updated] = await db
+      .update(teamMembers)
+      .set(prefs)
+      .where(eq(teamMembers.id, memberId))
+      .returning();
+    return updated;
+  }
+
+  async listTeamsWithRecurrence(): Promise<Team[]> {
+    return await db
+      .select()
+      .from(teams)
+      .where(sql`${teams.recurrenceFrequency} IS NOT NULL AND ${teams.startTime} IS NOT NULL`);
   }
 
   // Import Runs (PRD-015A)

@@ -300,13 +300,13 @@ async function extractRelationshipsWithCache(
   provider: AIProvider,
   cache: AICache,
   teamId: string
-): Promise<import("./ai").RelationshipResult[]> {
+): Promise<import("../ai").RelationshipResult[]> {
   if (notes.length < 2) {
     return [];
   }
 
   // Phase 1: Check cache for all note pairs
-  const cachedRelationships: import("./ai").RelationshipResult[] = [];
+  const cachedRelationships: import("../ai").RelationshipResult[] = [];
   const checkedPairs = new Set<string>();
   const uncachedPairs: Array<{ noteA: typeof notes[0]; noteB: typeof notes[0]; pairKey: string }> = [];
   let cacheHitCount = 0;
@@ -348,7 +348,7 @@ async function extractRelationshipsWithCache(
   }
 
   // Phase 2: Extract relationships for uncached pairs
-  let freshResults: import("./ai").RelationshipResult[] = [];
+  let freshResults: import("../ai").RelationshipResult[] = [];
 
   if (uncachedPairs.length > 0) {
     // Get unique notes that need relationship analysis
@@ -385,7 +385,7 @@ async function extractRelationshipsWithCache(
     for (const { noteA, noteB, pairKey } of uncachedPairs) {
       if (!pairsWithRelationships.has(pairKey)) {
         // This pair was analyzed but no relationship was found - cache that fact
-        const noRelationshipResult: import("./ai").RelationshipResult = {
+        const noRelationshipResult: import("../ai").RelationshipResult = {
           fromNoteId: noteA.id,
           toNoteId: noteB.id,
           relationshipType: "None",
@@ -409,7 +409,7 @@ async function extractRelationshipsWithCache(
   // Merge cached and fresh results, deduplicating by pair (exclude "None" relationships)
   const allResults = [...cachedRelationships, ...freshResults];
   const seenPairs = new Set<string>();
-  const deduplicatedResults: import("./ai").RelationshipResult[] = [];
+  const deduplicatedResults: import("../ai").RelationshipResult[] = [];
 
   for (const result of allResults) {
     if (result.relationshipType === "None") continue; // Don't include "no relationship" in results
