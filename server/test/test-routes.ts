@@ -47,6 +47,12 @@ import {
   makeMarkNotificationsReadHandler,
   makeUpdateNotificationPrefsHandler,
 } from "../notification-handlers";
+import {
+  sessionAudioUpload,
+  makeSessionRecordingUploadHandler,
+  makeSessionRecordingStatusHandler,
+  makeSessionRecordingConfigHandler,
+} from "../audio/session-audio-handlers";
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -1087,6 +1093,20 @@ export async function registerTestRoutes(
   app.post("/api/teams/:teamId/session-overrides", isAuthenticated, makeUpsertSessionOverrideHandler(storage));
   app.get("/api/teams/:teamId/session-overrides", isAuthenticated, makeGetSessionOverridesHandler(storage));
   app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, makeDeleteSessionOverrideHandler(storage));
+
+  // Session recordings (PRD-053)
+  app.get("/api/session-recordings/config", isAuthenticated, makeSessionRecordingConfigHandler());
+  app.post(
+    "/api/teams/:teamId/session-recordings",
+    isAuthenticated,
+    sessionAudioUpload.single("recording"),
+    makeSessionRecordingUploadHandler(storage)
+  );
+  app.get(
+    "/api/teams/:teamId/session-recordings/:operationId/status",
+    isAuthenticated,
+    makeSessionRecordingStatusHandler(storage)
+  );
 
   // Push + notifications (scheduling audit stage 3)
   app.get("/api/push/public-key", isAuthenticated, makePushPublicKeyHandler());

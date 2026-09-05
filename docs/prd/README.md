@@ -43,6 +43,16 @@ availability responses, attendance thresholds, and the reminder engine.
 | [PRD-014](PRD-014-conditional-info-icon.md) | Conditional Availability Info Icon | 🟢 Done |
 | [PRD-051](PRD-051-availability-reminders-and-push-notifications.md) | Availability Reminders & Push Notifications | 🟢 Done |
 
+## Group Data Intake
+
+Getting the whole group's existing record into Helm — the adoption
+prerequisite: Nuclino (PRD-015 family), OneNote, and Craig session recordings.
+
+| PRD | Feature | Status |
+|-----|---------|--------|
+| [PRD-052](PRD-052-onenote-import.md) | OneNote Import (Word export path) | 🟢 Done |
+| [PRD-053](PRD-053-craig-session-recording-intake.md) | Craig Session Recording Intake | 🟢 Done |
+
 ### Status Legend
 - 🔴 To Do - Not started
 - 🟡 In Progress - Implementation underway

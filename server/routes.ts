@@ -85,6 +85,12 @@ import {
   makeMarkNotificationsReadHandler,
   makeUpdateNotificationPrefsHandler,
 } from "./notification-handlers";
+import {
+  sessionAudioUpload,
+  makeSessionRecordingUploadHandler,
+  makeSessionRecordingStatusHandler,
+  makeSessionRecordingConfigHandler,
+} from "./audio/session-audio-handlers";
 
 // PRD-050 FR-3: explicit Nuclino links are high-confidence evidence.
 const NUCLINO_LINK_EVIDENCE_CONFIDENCE = 0.9;
@@ -2999,6 +3005,20 @@ export async function registerRoutes(
   app.post("/api/teams/:teamId/session-overrides", isAuthenticated, makeUpsertSessionOverrideHandler(storage));
   app.get("/api/teams/:teamId/session-overrides", isAuthenticated, makeGetSessionOverridesHandler(storage));
   app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, makeDeleteSessionOverrideHandler(storage));
+
+  // Session recordings (PRD-053): Craig multitrack audio → transcript + log
+  app.get("/api/session-recordings/config", isAuthenticated, makeSessionRecordingConfigHandler());
+  app.post(
+    "/api/teams/:teamId/session-recordings",
+    isAuthenticated,
+    sessionAudioUpload.single("recording"),
+    makeSessionRecordingUploadHandler(storage)
+  );
+  app.get(
+    "/api/teams/:teamId/session-recordings/:operationId/status",
+    isAuthenticated,
+    makeSessionRecordingStatusHandler(storage)
+  );
 
   // Push + notifications (scheduling audit stage 3)
   app.get("/api/push/public-key", isAuthenticated, makePushPublicKeyHandler());

@@ -9,9 +9,10 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable";
-import { Upload, ChevronLeft } from "lucide-react";
+import { Upload, ChevronLeft, Mic } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { SessionRecordingDialog } from "@/components/session-recording-dialog";
 import { NotesLeftPanel } from "@/components/notes/notes-left-panel";
 import { NotesEditorPanel } from "@/components/notes/notes-editor-panel";
 import { NuclinoImportDialog } from "@/components/nuclino-import-dialog";
@@ -39,6 +40,8 @@ export default function NotesPage({ team }: NotesPageProps) {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isTodayMode, setIsTodayMode] = useState(true);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  // PRD-053: Craig session-recording intake
+  const [isRecordingOpen, setIsRecordingOpen] = useState(false);
   // M9: below md the two panels become a single-pane list ⇄ editor flow.
   // Capture-first: the page opens on the Today editor, Back reaches the list.
   const [mobileView, setMobileView] = useState<"list" | "editor">("editor");
@@ -227,14 +230,25 @@ export default function NotesPage({ team }: NotesPageProps) {
       {/* Header bar */}
       <div className="flex items-center justify-between px-4 py-2 border-b bg-background">
         <h1 className="text-lg font-semibold">Notes</h1>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setIsImportOpen(true)}
-        >
-          <Upload className="h-4 w-4 mr-2" />
-          Import
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setIsRecordingOpen(true)}
+            data-testid="button-import-recording"
+          >
+            <Mic className="h-4 w-4 mr-2" />
+            Recording
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setIsImportOpen(true)}
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            Import
+          </Button>
+        </div>
       </div>
 
       {/* Layout: resizable two-panel on desktop, single-pane flow on mobile (M9) */}
@@ -344,6 +358,13 @@ export default function NotesPage({ team }: NotesPageProps) {
         open={isImportOpen}
         onOpenChange={setIsImportOpen}
         memberAiEnabled={currentMember?.aiEnabled ?? false}
+      />
+
+      {/* PRD-053: Session recording intake */}
+      <SessionRecordingDialog
+        teamId={team.id}
+        open={isRecordingOpen}
+        onOpenChange={setIsRecordingOpen}
       />
     </div>
   );
