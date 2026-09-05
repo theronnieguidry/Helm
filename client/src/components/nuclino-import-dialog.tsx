@@ -121,6 +121,8 @@ export function NuclinoImportDialog({
 
   const [state, setState] = useState<DialogState>("upload");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // PRD-052: the dialog imports from multiple sources through one pipeline
+  const [source, setSource] = useState<"nuclino" | "onenote">("nuclino");
   const [parseResult, setParseResult] = useState<ParseResponse | null>(null);
   const [commitResult, setCommitResult] = useState<CommitResponse | null>(null);
   // PRD-042: Granular empty page selection (replaces importEmptyPages boolean)
@@ -208,7 +210,7 @@ export function NuclinoImportDialog({
       const formData = new FormData();
       formData.append("zipFile", file);
 
-      const response = await fetch(`/api/teams/${teamId}/imports/nuclino/parse`, {
+      const response = await fetch(`/api/teams/${teamId}/imports/${source}/parse`, {
         method: "POST",
         body: formData,
         credentials: "include",
@@ -216,7 +218,7 @@ export function NuclinoImportDialog({
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.message || "Failed to parse ZIP file");
+        throw new Error(error.message || "Failed to parse the export file");
       }
 
       return response.json() as Promise<ParseResponse>;
@@ -529,28 +531,58 @@ export function NuclinoImportDialog({
   const renderUploadState = () => (
     <>
       <DialogHeader>
-        <DialogTitle>Import Notes from Nuclino</DialogTitle>
+        <DialogTitle>Import Notes</DialogTitle>
         <DialogDescription>
-          Upload a Nuclino export ZIP file to import your notes, preserving
-          links and categorization.
+          {source === "nuclino"
+            ? "Upload a Nuclino export ZIP file to import your notes, preserving links and categorization."
+            : "Upload OneNote pages exported as Word documents. In OneNote desktop: File → Export → Word Document (.docx), per page or per section."}
         </DialogDescription>
       </DialogHeader>
 
       <div className="space-y-4 py-4">
+        {/* PRD-052: source selector */}
+        <div className="space-y-2">
+          <Label htmlFor="import-source">Source</Label>
+          <Select
+            value={source}
+            onValueChange={(value) => {
+              setSource(value as "nuclino" | "onenote");
+              setSelectedFile(null);
+              if (fileInputRef.current) fileInputRef.current.value = "";
+            }}
+          >
+            <SelectTrigger id="import-source" data-testid="select-import-source">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="nuclino">Nuclino (.zip of Markdown)</SelectItem>
+              <SelectItem value="onenote">OneNote (.docx or .zip of .docx)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="flex flex-col items-center justify-center gap-4 p-8 border-2 border-dashed rounded-lg">
           <FileArchive className="h-12 w-12 text-muted-foreground" />
           <div className="text-center">
             <p className="text-sm text-muted-foreground">
-              Select a Nuclino export ZIP file
+              {source === "nuclino"
+                ? "Select a Nuclino export ZIP file"
+                : "Select a .docx file, or a .zip containing several"}
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              Only .zip files are accepted (max 50MB)
+              {source === "nuclino"
+                ? "Only .zip files are accepted (max 50MB)"
+                : ".docx and .zip are accepted (max 50MB)"}
             </p>
           </div>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".zip,application/zip,application/x-zip-compressed"
+            accept={
+              source === "nuclino"
+                ? ".zip,application/zip,application/x-zip-compressed"
+                : ".zip,.docx,application/zip,application/x-zip-compressed,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
             onChange={handleFileSelect}
             className="hidden"
             id="nuclino-zip-input"

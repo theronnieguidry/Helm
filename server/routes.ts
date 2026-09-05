@@ -111,6 +111,8 @@ interface ImportPlan {
   collections: Map<string, CollectionInfo>;
   classifications: Map<string, PageClassification>;
   summary: ImportSummary;
+  // PRD-052: the same plan/commit pipeline serves multiple source systems
+  sourceSystem: "NUCLINO" | "ONENOTE";
   createdAt: Date;
 }
 const importPlanCache = new Map<string, ImportPlan>();
@@ -1445,6 +1447,7 @@ export async function registerRoutes(
         collections,
         classifications,
         summary,
+        sourceSystem: "NUCLINO",
         createdAt: new Date(),
       });
 
@@ -1470,6 +1473,109 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error parsing Nuclino ZIP:", error);
       res.status(500).json({ message: "Failed to parse Nuclino export" });
+    }
+  });
+
+  // PRD-052: OneNote Import - parse .docx export(s) into the same import plan
+  // shape the Nuclino pipeline uses. Accepts a single .docx or a zip of .docx
+  // files (OneNote desktop: File → Export → Word Document, per page/section).
+  app.post("/api/teams/:teamId/imports/onenote/parse", isAuthenticated, upload.single("zipFile"), async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { teamId } = req.params;
+
+      const member = await storage.getTeamMember(teamId, userId);
+      if (!member) {
+        return res.status(403).json({ message: "Not a team member" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: "No file provided" });
+      }
+
+      const { convertDocxEntriesToPages } = await import("./onenote-import");
+
+      // Collect .docx buffers: either the upload IS one, or it's a zip of them
+      const originalName: string = req.file.originalname || "upload";
+      let docxEntries: Array<{ filename: string; buffer: Buffer; lastModified?: Date }> = [];
+
+      if (originalName.toLowerCase().endsWith(".docx")) {
+        docxEntries = [{ filename: originalName, buffer: req.file.buffer }];
+      } else {
+        try {
+          const zip = new AdmZip(req.file.buffer);
+          docxEntries = zip
+            .getEntries()
+            .filter((entry) => !entry.isDirectory && entry.entryName.toLowerCase().endsWith(".docx"))
+            // OneNote/macOS zips can include resource-fork junk under __MACOSX
+            .filter((entry) => !entry.entryName.startsWith("__MACOSX/"))
+            .map((entry) => ({
+              filename: entry.entryName,
+              buffer: entry.getData(),
+              lastModified: entry.header.time ? new Date(entry.header.time) : undefined,
+            }));
+        } catch {
+          return res.status(400).json({ message: "Upload a OneNote Word export (.docx) or a zip of .docx files" });
+        }
+      }
+
+      if (docxEntries.length === 0) {
+        return res.status(400).json({ message: "No .docx files found. In OneNote desktop use File → Export → Word Document." });
+      }
+
+      const { pages: convertedEntries, warnings } = await convertDocxEntriesToPages(docxEntries);
+      if (convertedEntries.length === 0) {
+        return res.status(400).json({
+          message: "None of the files could be read as Word documents",
+          warnings,
+        });
+      }
+
+      // PRD-040: Fetch team member character names for PC detection
+      const teamMembers = await storage.getTeamMembers(teamId);
+      const detectedPCNames = teamMembers
+        .map(m => m.characterName)
+        .filter((name): name is string => !!name);
+      const partyMemberNames = new Set(detectedPCNames.map(n => n.toLowerCase()));
+
+      // The converted entries are Nuclino-shaped — the whole pipeline reuses
+      const { pages, collections, classifications, summary } = processNuclinoExport(convertedEntries, partyMemberNames);
+      const linkStats = summarizeNuclinoLinks(pages);
+
+      const importPlanId = `${teamId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      importPlanCache.set(importPlanId, {
+        teamId,
+        pages,
+        collections,
+        classifications,
+        summary,
+        sourceSystem: "ONENOTE",
+        createdAt: new Date(),
+      });
+
+      const pagesList = pages.map(page => {
+        const classification = classifications.get(page.sourcePageId);
+        return {
+          sourcePageId: page.sourcePageId,
+          title: page.title,
+          noteType: classification?.noteType || "note",
+          questStatus: classification?.questStatus,
+          isEmpty: page.isEmpty,
+        };
+      });
+
+      res.json({
+        importPlanId,
+        summary,
+        linkStats,
+        pages: pagesList,
+        detectedPCNames,
+        warnings,
+      });
+    } catch (error) {
+      console.error("Error parsing OneNote export:", error);
+      res.status(500).json({ message: "Failed to parse OneNote export" });
     }
   });
 
@@ -1543,12 +1649,15 @@ export async function registerRoutes(
         }
       }
 
+      // PRD-052: the commit pipeline is source-agnostic — the plan carries it
+      const sourceSystem = plan.sourceSystem ?? "NUCLINO";
+
       // PRD-015A: Create import run record FIRST
       // P2-4 F51: the run starts "pending" and only becomes "completed" after
       // all note-writing work has actually finished.
       const importRun = await storage.createImportRun({
         teamId,
-        sourceSystem: "NUCLINO",
+        sourceSystem,
         createdByUserId: userId,
         status: "pending",
         options: {
@@ -1593,7 +1702,7 @@ export async function registerRoutes(
 
         try {
           // PRD-015A: Check if existing note for snapshot
-          const existingNote = await storage.findNoteBySourceId(teamId, "NUCLINO", page.sourcePageId);
+          const existingNote = await storage.findNoteBySourceId(teamId, sourceSystem, page.sourcePageId);
 
           if (existingNote) {
             // PRD-015A FR-6: Create snapshot before updating
@@ -1634,7 +1743,7 @@ export async function registerRoutes(
               content: page.content,
               noteType,
               questStatus: questStatus ?? null,
-              sourceSystem: "NUCLINO",
+              sourceSystem,
               sourcePageId: page.sourcePageId,
               contentMarkdown: page.contentRaw,
               contentMarkdownResolved: page.content,
