@@ -11,6 +11,12 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
+    "typecheck": "npm run check",
+    "test": "npm run test:unit",
+    "test:unit": "npx vitest run",
+    "test:watch": "npx vitest",
+    "test:coverage": "npx vitest run --coverage",
+    "test:e2e": "npx playwright test",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

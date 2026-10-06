@@ -7,7 +7,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['**/*.test.ts', '**/*.test.tsx', '**/*.spec.ts'],
+    // Vitest unit/integration tests live alongside code. Our Playwright specs live under e2e/.
+    // Keep these worlds separate so `vitest run` stays deterministic.
+    include: ['**/*.test.ts', '**/*.test.tsx'],
     exclude: ['node_modules', 'dist', '.cache', 'e2e/**'],
     coverage: {
       provider: 'v8',
