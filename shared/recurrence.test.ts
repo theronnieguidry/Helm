@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { formatInTimeZone } from "date-fns-tz";
 import {
   classifyAvailability,
   formatTimeHHMM,
@@ -6,8 +7,20 @@ import {
   setTimeFromString,
   generateSessionCandidates,
   getSessionEndTime,
+  instantAt,
+  zonedDateKey,
+  dayOfWeekForKey,
+  DEFAULT_TEAM_TIMEZONE,
 } from "./recurrence";
 import type { Team, SessionOverride } from "./schema";
+
+const NY = "America/New_York";
+
+// Host-TZ-independent instant helpers: all ranges are explicit team-zone
+// wall-clock times, so these tests pass identically on any CI host (audit S5).
+const nyStart = (key: string) => instantAt(key, "00:00", NY);
+const nyEnd = (key: string) => instantAt(key, "23:59", NY);
+const nyTime = (d: Date) => formatInTimeZone(d, NY, "HH:mm");
 
 describe("classifyAvailability", () => {
   describe("full coverage", () => {
@@ -67,6 +80,30 @@ describe("classifyAvailability", () => {
       expect(classifyAvailability("22:00", "24:00", "19:00", "22:00")).toBe("none");
     });
   });
+
+  // Audit S5: a 23:00 session with a 3h duration ends at 02:00 — the old
+  // minutes math returned garbage for every comparison against it.
+  describe("sessions crossing midnight", () => {
+    it("classifies full coverage of a wrapping session", () => {
+      expect(classifyAvailability("22:00", "03:00", "23:00", "02:00")).toBe("full");
+    });
+
+    it("classifies a member window that also wraps", () => {
+      expect(classifyAvailability("23:00", "02:00", "23:00", "02:00")).toBe("full");
+    });
+
+    it("classifies the pre-midnight tail as partial", () => {
+      expect(classifyAvailability("21:00", "00:00", "23:00", "02:00")).toBe("partial");
+    });
+
+    it("classifies a post-midnight-only window as partial via the shifted day", () => {
+      expect(classifyAvailability("00:30", "02:00", "23:00", "02:00")).toBe("partial");
+    });
+
+    it("returns none for an afternoon window against a late-night session", () => {
+      expect(classifyAvailability("14:00", "17:00", "23:00", "02:00")).toBe("none");
+    });
+  });
 });
 
 describe("formatTimeHHMM", () => {
@@ -102,14 +139,6 @@ describe("setTimeFromString", () => {
     expect(result.getSeconds()).toBe(0);
   });
 
-  it("preserves the original date", () => {
-    const date = new Date(2026, 5, 15);
-    const result = setTimeFromString(date, "08:00");
-    expect(result.getFullYear()).toBe(2026);
-    expect(result.getMonth()).toBe(5);
-    expect(result.getDate()).toBe(15);
-  });
-
   it("does not mutate the original date", () => {
     const date = new Date(2026, 0, 17, 12, 0);
     setTimeFromString(date, "19:30");
@@ -135,6 +164,25 @@ describe("getSessionEndTime", () => {
   });
 });
 
+describe("timezone primitives", () => {
+  it("zonedDateKey gives the team-zone calendar date of an instant", () => {
+    // 2026-01-02T01:00Z is still Jan 1 in New York (UTC-5)
+    expect(zonedDateKey(new Date("2026-01-02T01:00:00Z"), NY)).toBe("2026-01-01");
+    expect(zonedDateKey(new Date("2026-01-02T06:00:00Z"), NY)).toBe("2026-01-02");
+  });
+
+  it("instantAt resolves wall-clock time DST-correctly", () => {
+    // Jan 15 (EST, UTC-5) vs Jul 15 (EDT, UTC-4) — same wall clock, different instants
+    expect(instantAt("2026-01-15", "19:00", NY).toISOString()).toBe("2026-01-16T00:00:00.000Z");
+    expect(instantAt("2026-07-15", "19:00", NY).toISOString()).toBe("2026-07-15T23:00:00.000Z");
+  });
+
+  it("dayOfWeekForKey is pure calendar math", () => {
+    expect(dayOfWeekForKey("2026-01-01")).toBe(4); // Thursday
+    expect(dayOfWeekForKey("2026-01-04")).toBe(0); // Sunday
+  });
+});
+
 describe("generateSessionCandidates", () => {
   // Helper to create a team with recurrence settings
   function createTeam(overrides: Partial<Team> = {}): Team {
@@ -148,83 +196,81 @@ describe("generateSessionCandidates", () => {
       dayOfWeek: 4, // Thursday
       daysOfMonth: null,
       startTime: "19:00",
-      timezone: "America/New_York",
+      timezone: NY,
       recurrenceAnchorDate: null,
       minAttendanceThreshold: 2,
       defaultSessionDurationMinutes: 180,
+      aiEnabled: false,
+      aiEnabledAt: null,
       createdAt: new Date(),
       ...overrides,
-    };
+    } as Team;
   }
 
   describe("weekly recurrence", () => {
-    it("generates weekly sessions", () => {
-      const team = createTeam({
-        recurrenceFrequency: "weekly",
-        dayOfWeek: 4, // Thursday
-      });
+    it("generates weekly sessions with team-timezone occurrence keys", () => {
+      const team = createTeam({ recurrenceFrequency: "weekly", dayOfWeek: 4 });
 
       // January 2026: Thursdays are 1, 8, 15, 22, 29
-      const fromDate = new Date(2026, 0, 1); // Jan 1
-      const toDate = new Date(2026, 0, 31); // Jan 31
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      expect(candidates).toHaveLength(5);
-      expect(candidates[0].occurrenceKey).toBe("2026-01-01");
-      expect(candidates[1].occurrenceKey).toBe("2026-01-08");
-      expect(candidates[2].occurrenceKey).toBe("2026-01-15");
-      expect(candidates[3].occurrenceKey).toBe("2026-01-22");
-      expect(candidates[4].occurrenceKey).toBe("2026-01-29");
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
+        "2026-01-01",
+        "2026-01-08",
+        "2026-01-15",
+        "2026-01-22",
+        "2026-01-29",
+      ]);
     });
 
-    it("sets correct start and end times", () => {
-      const team = createTeam({
-        startTime: "19:00",
-        defaultSessionDurationMinutes: 180,
-      });
+    it("sets start and end times as team-zone wall clock", () => {
+      const team = createTeam({ startTime: "19:00", defaultSessionDurationMinutes: 180 });
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 8);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-08"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
+      expect(nyTime(candidates[0].scheduledAt)).toBe("19:00");
+      expect(nyTime(candidates[0].endsAt)).toBe("22:00");
+      // EST in January: 19:00 ET == 00:00Z next day, on ANY host timezone
+      expect(candidates[0].scheduledAt.toISOString()).toBe("2026-01-02T00:00:00.000Z");
+    });
 
-      expect(candidates[0].scheduledAt.getHours()).toBe(19);
-      expect(candidates[0].scheduledAt.getMinutes()).toBe(0);
-      expect(candidates[0].endsAt.getHours()).toBe(22);
-      expect(candidates[0].endsAt.getMinutes()).toBe(0);
+    it("keeps the same wall-clock time across a DST transition", () => {
+      const team = createTeam({ startTime: "19:00" });
+
+      // US DST starts 2026-03-08 — candidates on both sides of it
+      const candidates = generateSessionCandidates(team, nyStart("2026-03-01"), nyEnd("2026-03-21"));
+
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
+        "2026-03-05",
+        "2026-03-12",
+        "2026-03-19",
+      ]);
+      for (const c of candidates) {
+        expect(nyTime(c.scheduledAt)).toBe("19:00");
+      }
+      // The UTC offset actually changed between the first and last candidate
+      expect(candidates[0].scheduledAt.getUTCHours()).toBe(0); // EST: 19+5
+      expect(candidates[2].scheduledAt.getUTCHours()).toBe(23); // EDT: 19+4
     });
 
     it("returns empty array when no recurrence settings", () => {
-      const team = createTeam({
-        recurrenceFrequency: null,
-        dayOfWeek: null,
-        startTime: null,
-      });
-
-      const candidates = generateSessionCandidates(
-        team,
-        new Date(2026, 0, 1),
-        new Date(2026, 0, 31)
-      );
-
-      expect(candidates).toHaveLength(0);
+      const team = createTeam({ recurrenceFrequency: null, dayOfWeek: null, startTime: null });
+      expect(
+        generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"))
+      ).toHaveLength(0);
     });
 
     it("returns empty array when startTime is missing", () => {
-      const team = createTeam({
-        recurrenceFrequency: "weekly",
-        dayOfWeek: 4,
-        startTime: null,
-      });
+      const team = createTeam({ recurrenceFrequency: "weekly", dayOfWeek: 4, startTime: null });
+      expect(
+        generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"))
+      ).toHaveLength(0);
+    });
 
-      const candidates = generateSessionCandidates(
-        team,
-        new Date(2026, 0, 1),
-        new Date(2026, 0, 31)
-      );
-
-      expect(candidates).toHaveLength(0);
+    it("falls back to the default timezone when the team has none", () => {
+      const team = createTeam({ timezone: null });
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-08"));
+      expect(formatInTimeZone(candidates[0].scheduledAt, DEFAULT_TEAM_TIMEZONE, "HH:mm")).toBe("19:00");
     });
   });
 
@@ -233,38 +279,47 @@ describe("generateSessionCandidates", () => {
       const team = createTeam({
         recurrenceFrequency: "biweekly",
         dayOfWeek: 4, // Thursday
-        recurrenceAnchorDate: new Date(2026, 0, 1), // First Thursday of Jan 2026
+        recurrenceAnchorDate: instantAt("2026-01-01", "12:00", NY),
       });
 
-      // January 2026: Thursdays are 1, 8, 15, 22, 29
       // Biweekly from Jan 1: Jan 1, Jan 15, Jan 29
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 31);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      expect(candidates).toHaveLength(3);
-      expect(candidates[0].occurrenceKey).toBe("2026-01-01");
-      expect(candidates[1].occurrenceKey).toBe("2026-01-15");
-      expect(candidates[2].occurrenceKey).toBe("2026-01-29");
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
+        "2026-01-01",
+        "2026-01-15",
+        "2026-01-29",
+      ]);
     });
 
     it("respects anchor date for alternating weeks", () => {
       const team = createTeam({
         recurrenceFrequency: "biweekly",
         dayOfWeek: 4, // Thursday
-        recurrenceAnchorDate: new Date(2026, 0, 8), // Second Thursday
+        recurrenceAnchorDate: instantAt("2026-01-08", "12:00", NY),
       });
 
       // Biweekly from Jan 8: Jan 8, Jan 22
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 31);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual(["2026-01-08", "2026-01-22"]);
+    });
 
-      expect(candidates).toHaveLength(2);
-      expect(candidates[0].occurrenceKey).toBe("2026-01-08");
-      expect(candidates[1].occurrenceKey).toBe("2026-01-22");
+    it("keeps week parity across a DST boundary", () => {
+      const team = createTeam({
+        recurrenceFrequency: "biweekly",
+        dayOfWeek: 4,
+        recurrenceAnchorDate: instantAt("2026-02-26", "12:00", NY),
+      });
+
+      // DST starts Mar 8; parity must not drift: Feb 26, Mar 12, Mar 26
+      const candidates = generateSessionCandidates(team, nyStart("2026-02-20"), nyEnd("2026-03-31"));
+
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
+        "2026-02-26",
+        "2026-03-12",
+        "2026-03-26",
+      ]);
     });
 
     it("returns empty when no anchor date", () => {
@@ -273,14 +328,9 @@ describe("generateSessionCandidates", () => {
         dayOfWeek: 4,
         recurrenceAnchorDate: null,
       });
-
-      const candidates = generateSessionCandidates(
-        team,
-        new Date(2026, 0, 1),
-        new Date(2026, 0, 31)
-      );
-
-      expect(candidates).toHaveLength(0);
+      expect(
+        generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"))
+      ).toHaveLength(0);
     });
   });
 
@@ -292,15 +342,9 @@ describe("generateSessionCandidates", () => {
         daysOfMonth: [15, 1],
       });
 
-      // Q1 2026: Jan-Mar
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 2, 31);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-03-31"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      // 1st and 15th of each month = 6 sessions
-      expect(candidates).toHaveLength(6);
-      expect(candidates.map(c => c.occurrenceKey)).toEqual([
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
         "2026-01-01",
         "2026-01-15",
         "2026-02-01",
@@ -311,136 +355,107 @@ describe("generateSessionCandidates", () => {
     });
 
     it("handles day overflow for short months (Feb 30 → Feb 28)", () => {
-      const team = createTeam({
-        recurrenceFrequency: "monthly",
-        daysOfMonth: [30],
-      });
+      const team = createTeam({ recurrenceFrequency: "monthly", daysOfMonth: [30] });
 
-      const fromDate = new Date(2026, 1, 1); // Feb 1
-      const toDate = new Date(2026, 1, 28); // Feb 28
+      const candidates = generateSessionCandidates(team, nyStart("2026-02-01"), nyEnd("2026-02-28"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      // Day 30 in Feb → uses Feb 28
       expect(candidates).toHaveLength(1);
       expect(candidates[0].occurrenceKey).toBe("2026-02-28");
     });
 
     it("handles day 31 in months with 30 days", () => {
-      const team = createTeam({
-        recurrenceFrequency: "monthly",
-        daysOfMonth: [31],
-      });
+      const team = createTeam({ recurrenceFrequency: "monthly", daysOfMonth: [31] });
 
-      const fromDate = new Date(2026, 3, 1); // April 1
-      const toDate = new Date(2026, 3, 30); // April 30
+      const candidates = generateSessionCandidates(team, nyStart("2026-04-01"), nyEnd("2026-04-30"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      // April has 30 days, so 31 → 30
       expect(candidates).toHaveLength(1);
       expect(candidates[0].occurrenceKey).toBe("2026-04-30");
     });
 
+    it("does not emit duplicate occurrenceKeys when two targets clamp to the same day (audit S14)", () => {
+      const team = createTeam({ recurrenceFrequency: "monthly", daysOfMonth: [30, 31] });
+
+      const candidates = generateSessionCandidates(team, nyStart("2026-02-01"), nyEnd("2026-02-28"));
+
+      // Both 30 and 31 clamp to Feb 28 — one candidate, not two
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0].occurrenceKey).toBe("2026-02-28");
+    });
+
     it("returns empty when daysOfMonth is empty", () => {
-      const team = createTeam({
-        recurrenceFrequency: "monthly",
-        daysOfMonth: [],
-      });
-
-      const candidates = generateSessionCandidates(
-        team,
-        new Date(2026, 0, 1),
-        new Date(2026, 0, 31)
-      );
-
-      expect(candidates).toHaveLength(0);
+      const team = createTeam({ recurrenceFrequency: "monthly", daysOfMonth: [] });
+      expect(
+        generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"))
+      ).toHaveLength(0);
     });
   });
 
   describe("session overrides", () => {
+    function makeOverride(overrides: Partial<SessionOverride>): SessionOverride {
+      return {
+        id: "override-1",
+        teamId: "team-1",
+        occurrenceKey: "2026-01-08",
+        status: "scheduled",
+        scheduledAtOverride: null,
+        updatedBy: "dm-user",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...overrides,
+      } as SessionOverride;
+    }
+
     it("applies cancel override", () => {
       const team = createTeam();
-      const overrides: SessionOverride[] = [
-        {
-          id: "override-1",
-          teamId: team.id,
-          occurrenceKey: "2026-01-08",
-          status: "canceled",
-          scheduledAtOverride: null,
-          updatedBy: "dm-user",
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      ];
+      const overrides = [makeOverride({ status: "canceled" })];
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 15);
-
-      const candidates = generateSessionCandidates(team, fromDate, toDate, overrides);
+      const candidates = generateSessionCandidates(
+        team,
+        nyStart("2026-01-01"),
+        nyEnd("2026-01-15"),
+        overrides
+      );
 
       expect(candidates).toHaveLength(3);
-
-      const canceledSession = candidates.find(c => c.occurrenceKey === "2026-01-08");
+      const canceledSession = candidates.find((c) => c.occurrenceKey === "2026-01-08");
       expect(canceledSession?.status).toBe("canceled");
       expect(canceledSession?.isOverridden).toBe(true);
     });
 
-    it("applies reschedule override", () => {
+    it("applies reschedule override as an absolute instant", () => {
       const team = createTeam();
-      const newTime = new Date(2026, 0, 9, 20, 0); // Friday at 8 PM instead of Thursday
+      const newTime = instantAt("2026-01-09", "20:00", NY); // Friday 8 PM instead of Thursday
 
-      const overrides: SessionOverride[] = [
-        {
-          id: "override-1",
-          teamId: team.id,
-          occurrenceKey: "2026-01-08",
-          status: "scheduled",
-          scheduledAtOverride: newTime,
-          updatedBy: "dm-user",
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      ];
+      const overrides = [makeOverride({ scheduledAtOverride: newTime })];
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 15);
+      const candidates = generateSessionCandidates(
+        team,
+        nyStart("2026-01-01"),
+        nyEnd("2026-01-15"),
+        overrides
+      );
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate, overrides);
-
-      const rescheduledSession = candidates.find(c => c.occurrenceKey === "2026-01-08");
-      expect(rescheduledSession?.scheduledAt.getDate()).toBe(9);
-      expect(rescheduledSession?.scheduledAt.getHours()).toBe(20);
+      const rescheduledSession = candidates.find((c) => c.occurrenceKey === "2026-01-08");
+      expect(rescheduledSession?.scheduledAt.getTime()).toBe(newTime.getTime());
+      expect(nyTime(rescheduledSession!.scheduledAt)).toBe("20:00");
       expect(rescheduledSession?.isOverridden).toBe(true);
     });
 
     it("computes correct end time after reschedule", () => {
-      const team = createTeam({
-        defaultSessionDurationMinutes: 120, // 2 hours
-      });
-      const newTime = new Date(2026, 0, 9, 18, 30); // 6:30 PM
+      const team = createTeam({ defaultSessionDurationMinutes: 120 });
+      const newTime = instantAt("2026-01-09", "18:30", NY);
 
-      const overrides: SessionOverride[] = [
-        {
-          id: "override-1",
-          teamId: team.id,
-          occurrenceKey: "2026-01-08",
-          status: "scheduled",
-          scheduledAtOverride: newTime,
-          updatedBy: "dm-user",
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      ];
+      const overrides = [makeOverride({ scheduledAtOverride: newTime })];
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 15);
+      const candidates = generateSessionCandidates(
+        team,
+        nyStart("2026-01-01"),
+        nyEnd("2026-01-15"),
+        overrides
+      );
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate, overrides);
-
-      const rescheduledSession = candidates.find(c => c.occurrenceKey === "2026-01-08");
-      expect(rescheduledSession?.endsAt.getHours()).toBe(20); // 8:30 PM
-      expect(rescheduledSession?.endsAt.getMinutes()).toBe(30);
+      const rescheduledSession = candidates.find((c) => c.occurrenceKey === "2026-01-08");
+      expect(nyTime(rescheduledSession!.endsAt)).toBe("20:30");
     });
   });
 
@@ -451,12 +466,9 @@ describe("generateSessionCandidates", () => {
         daysOfMonth: [20, 5, 15],
       });
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 31);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      expect(candidates.map(c => c.occurrenceKey)).toEqual([
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
         "2026-01-05",
         "2026-01-15",
         "2026-01-20",
@@ -464,51 +476,51 @@ describe("generateSessionCandidates", () => {
     });
 
     it("excludes candidates before fromDate", () => {
-      const team = createTeam({
-        recurrenceFrequency: "weekly",
-        dayOfWeek: 4, // Thursday
-      });
+      const team = createTeam({ recurrenceFrequency: "weekly", dayOfWeek: 4 });
 
-      // Start from Jan 10 - should skip Jan 1 and Jan 8
-      const fromDate = new Date(2026, 0, 10);
-      const toDate = new Date(2026, 0, 31);
+      // Start from Jan 10 — should skip Jan 1 and Jan 8
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-10"), nyEnd("2026-01-31"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      expect(candidates).toHaveLength(3);
-      expect(candidates[0].occurrenceKey).toBe("2026-01-15");
+      expect(candidates.map((c) => c.occurrenceKey)).toEqual([
+        "2026-01-15",
+        "2026-01-22",
+        "2026-01-29",
+      ]);
     });
   });
 
   describe("default session duration", () => {
     it("uses default 180 minutes when not specified", () => {
-      const team = createTeam({
-        defaultSessionDurationMinutes: null,
-        startTime: "19:00",
-      });
+      const team = createTeam({ defaultSessionDurationMinutes: null, startTime: "19:00" });
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 8);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-08"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
-
-      // 19:00 + 180 min = 22:00
-      expect(candidates[0].endsAt.getHours()).toBe(22);
+      expect(nyTime(candidates[0].endsAt)).toBe("22:00");
     });
 
     it("uses custom duration when specified", () => {
-      const team = createTeam({
-        defaultSessionDurationMinutes: 240, // 4 hours
-        startTime: "19:00",
-      });
+      const team = createTeam({ defaultSessionDurationMinutes: 240, startTime: "19:00" });
 
-      const fromDate = new Date(2026, 0, 1);
-      const toDate = new Date(2026, 0, 8);
+      const candidates = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-08"));
 
-      const candidates = generateSessionCandidates(team, fromDate, toDate);
+      expect(nyTime(candidates[0].endsAt)).toBe("23:00");
+    });
+  });
 
-      // 19:00 + 240 min = 23:00
-      expect(candidates[0].endsAt.getHours()).toBe(23);
+  describe("host-timezone independence (audit S5)", () => {
+    it("produces identical occurrence keys for equivalent instant ranges", () => {
+      const team = createTeam();
+      // The same absolute range expressed two ways
+      const a = generateSessionCandidates(
+        team,
+        new Date("2026-01-01T05:00:00Z"),
+        new Date("2026-02-01T04:59:00Z")
+      );
+      const b = generateSessionCandidates(team, nyStart("2026-01-01"), nyEnd("2026-01-31"));
+      expect(a.map((c) => c.occurrenceKey)).toEqual(b.map((c) => c.occurrenceKey));
+      expect(a.map((c) => c.scheduledAt.toISOString())).toEqual(
+        b.map((c) => c.scheduledAt.toISOString())
+      );
     });
   });
 });

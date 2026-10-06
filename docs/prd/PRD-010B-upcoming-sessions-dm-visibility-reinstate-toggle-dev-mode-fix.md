@@ -1,7 +1,7 @@
 # PRD-010B — Upcoming Sessions: DM Visibility, Reinstate Toggle, and Dev Mode Fix
 
 ## Story Status
-Proposed (Follow-up to PRD-010A — Bug Fixes + UX Improvements)
+Implemented (Follow-up to PRD-010A; member visibility and dev-mode gating amended by PRD-051)
 
 ---
 

@@ -1,7 +1,7 @@
 # PRD-010 — Upcoming Sessions: Eligibility, Attendance Threshold, and DM Controls
 
 ## Story Status
-Proposed (High Priority – Behavioral Correction)
+Implemented
 
 ---
 

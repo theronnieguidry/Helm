@@ -209,6 +209,43 @@ describe("Session Logs API (PRD-001)", () => {
       expect(allNotes).toHaveLength(2);
     });
 
+    // M1 (MVP audit): sessions are per-author — a second member gets their own
+    it("should create a separate session per author for the same date", async () => {
+      const sessionDate = new Date("2024-03-20T19:00:00Z");
+
+      const firstRes = await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "DM Session",
+          noteType: "session_log",
+          sessionDate: sessionDate.toISOString(),
+        })
+        .expect(200);
+
+      // Second member of the same team, same shared storage
+      const memberUser = createTestUser({ id: "member-2" });
+      storage.setUser(memberUser);
+      await storage.createTeamMember({ teamId, userId: memberUser.id, role: "member" });
+      const memberResult = await createTestApp({ storage, authenticatedUser: memberUser });
+
+      const secondRes = await request(memberResult.app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "Player Session",
+          noteType: "session_log",
+          sessionDate: sessionDate.toISOString(),
+        })
+        .expect(200);
+
+      expect(secondRes.body.id).not.toBe(firstRes.body.id);
+      expect(secondRes.body.authorId).toBe(memberUser.id);
+
+      const allNotes = await storage.getSessionLogs(teamId);
+      expect(allNotes).toHaveLength(2);
+
+      memberResult.server.close();
+    });
+
     // PRD-023: Non-session notes should not be affected by idempotency
     it("should allow creating multiple notes of other types on same date", async () => {
       const date = new Date("2024-03-19T19:00:00Z");
@@ -402,6 +439,32 @@ describe("Session Logs API (PRD-001)", () => {
       expect(res.body).not.toBeNull();
       expect(res.body.title).toBe("Today's Session");
       expect(res.body.content).toBe("Today's notes");
+    });
+
+    // M1: today's session resolves per author — another member's session for
+    // today must never pre-fill this user's editor.
+    it("should not return another author's session for today", async () => {
+      const memberUser = createTestUser({ id: "member-2" });
+      storage.setUser(memberUser);
+      await storage.createTeamMember({ teamId, userId: memberUser.id, role: "member" });
+      const memberResult = await createTestApp({ storage, authenticatedUser: memberUser });
+
+      await request(app)
+        .post(`/api/teams/${teamId}/notes`)
+        .send({
+          title: "DM Session",
+          noteType: "session_log",
+          sessionDate: new Date().toISOString(),
+          content: "DM only notes",
+        })
+        .expect(200);
+
+      const res = await request(memberResult.app)
+        .get(`/api/teams/${teamId}/notes/today-session`)
+        .expect(200);
+
+      expect(res.body).toBeNull();
+      memberResult.server.close();
     });
 
     it("should not return sessions from other dates", async () => {

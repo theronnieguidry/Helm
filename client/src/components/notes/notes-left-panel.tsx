@@ -29,11 +29,14 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  CheckCircle2,
   X,
   ArrowRight,
   MoreHorizontal,
+  Lock,
 } from "lucide-react";
-import type { Note, NoteType, Team } from "@shared/schema";
+import type { Note, NoteType, QuestStatus, Team } from "@shared/schema";
+import { QUEST_STATUSES, QUEST_STATUS_LABELS, QUEST_STATUS_COLORS } from "@shared/schema";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 
@@ -142,11 +145,26 @@ interface NeedsReviewItem {
   explanation: string | null;
 }
 
+// M8: show why a row matched a content search — a small context window
+// around the first occurrence of the query.
+function matchSnippet(content: string | null | undefined, query: string): string | null {
+  if (!content) return null;
+  const idx = content.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return null;
+  const start = Math.max(0, idx - 30);
+  const end = Math.min(content.length, idx + query.length + 50);
+  const slice = content.slice(start, end).replace(/\s+/g, " ").trim();
+  return `${start > 0 ? "…" : ""}${slice}${end < content.length ? "…" : ""}`;
+}
+
 interface NotesLeftPanelProps {
   notes: Note[];
   team: Team;
   selectedNoteId: string | null;
   isTodayMode: boolean;
+  // M13: authorId → display name for session rows
+  authorNames?: Record<string, string>;
+  currentUserId?: string;
   onSelectNote: (note: Note) => void;
   onSelectTodaySession: () => void;
   needsReviewItems?: NeedsReviewItem[];
@@ -162,6 +180,8 @@ export function NotesLeftPanel({
   team,
   selectedNoteId,
   isTodayMode,
+  authorNames,
+  currentUserId,
   onSelectNote,
   onSelectTodaySession,
   needsReviewItems,
@@ -174,6 +194,8 @@ export function NotesLeftPanel({
   const [expandedSections, setExpandedSections] = useState<string[]>([
     "sessions",
   ]);
+  // P2-1 (PRD-004 FR-5, gap F32): filter quests by lifecycle status
+  const [questStatusFilter, setQuestStatusFilter] = useState<QuestStatus | "all">("all");
   // PRD-037: State for needs review section
   const [isNeedsReviewExpanded, setIsNeedsReviewExpanded] = useState(true);
   // PRD-038: State for expanded review item
@@ -212,6 +234,27 @@ export function NotesLeftPanel({
   }, [notes, searchQuery]);
 
   const todayStr = format(new Date(), "yyyy-MM-dd");
+
+  // M8: search must reveal its own results — while a query is active, every
+  // category with matches is force-expanded (only Sessions is open by default,
+  // so matches elsewhere used to hide behind collapsed headers).
+  const trimmedQuery = searchQuery.trim();
+  const isSearching = trimmedQuery !== "";
+  const matchedCategoryKeys = useMemo(
+    () =>
+      FILTER_CATEGORIES.filter(
+        (c) => (notesByCategory[c.key]?.length ?? 0) > 0
+      ).map((c) => c.key),
+    [notesByCategory]
+  );
+  const totalMatches = useMemo(
+    () =>
+      FILTER_CATEGORIES.reduce(
+        (sum, c) => sum + (notesByCategory[c.key]?.length ?? 0),
+        0
+      ),
+    [notesByCategory]
+  );
 
   return (
     <div className="flex flex-col h-full bg-muted/30">
@@ -424,14 +467,27 @@ export function NotesLeftPanel({
             )}
           </div>
         )}
+        {/* M8: global empty state so "no results" is stated, not implied */}
+        {isSearching && totalMatches === 0 && (
+          <p className="text-sm text-muted-foreground text-center py-8 px-4">
+            No matches for "{trimmedQuery}"
+          </p>
+        )}
         <Accordion
           type="multiple"
-          value={expandedSections}
+          value={isSearching ? matchedCategoryKeys : expandedSections}
           onValueChange={setExpandedSections}
           className="px-2"
         >
           {FILTER_CATEGORIES.map((category) => {
-            const categoryNotes = notesByCategory[category.key] || [];
+            const allCategoryNotes = notesByCategory[category.key] || [];
+            // P2-1: quests can be narrowed to a single lifecycle status
+            const categoryNotes =
+              category.key === "quests" && questStatusFilter !== "all"
+                ? allCategoryNotes.filter(
+                    (note) => (note.questStatus || "lead") === questStatusFilter
+                  )
+                : allCategoryNotes;
             const Icon = category.icon;
 
             return (
@@ -445,11 +501,33 @@ export function NotesLeftPanel({
                     <Icon className={cn("h-4 w-4", category.color)} />
                     <span className="text-sm">{category.label}</span>
                     <Badge variant="secondary" className="ml-1 h-5 px-1.5">
-                      {categoryNotes.length}
+                      {allCategoryNotes.length}
                     </Badge>
                   </div>
                 </AccordionTrigger>
                 <AccordionContent className="pb-2">
+                  {category.key === "quests" && allCategoryNotes.length > 0 && (
+                    <div
+                      className="flex flex-wrap gap-1 px-2 pb-2"
+                      data-testid="quest-status-filter"
+                    >
+                      {(["all", ...QUEST_STATUSES] as const).map((status) => (
+                        <button
+                          key={status}
+                          type="button"
+                          onClick={() => setQuestStatusFilter(status)}
+                          className={cn(
+                            "text-xs px-2 py-0.5 rounded-full border transition-colors",
+                            questStatusFilter === status
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-transparent text-muted-foreground hover:bg-accent"
+                          )}
+                        >
+                          {status === "all" ? "All" : QUEST_STATUS_LABELS[status]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {categoryNotes.length === 0 ? (
                     <p className="text-xs text-muted-foreground pl-6 py-2">
                       No items
@@ -479,7 +557,57 @@ export function NotesLeftPanel({
                                 </span>
                               ) : null}
                               <span className="truncate">{note.title}</span>
+                              {/* M3: private notes are visibly marked */}
+                              {note.isPrivate && (
+                                <Lock
+                                  className="h-3 w-3 text-muted-foreground flex-shrink-0"
+                                  aria-label="Private note"
+                                />
+                              )}
+                              {/* P2-1 (PRD-004 FR-5): quest lifecycle at a glance */}
+                              {note.noteType === "quest" && (
+                                <Badge
+                                  variant="secondary"
+                                  className={cn(
+                                    "text-xs py-0 px-1.5 flex-shrink-0",
+                                    QUEST_STATUS_COLORS[note.questStatus || "lead"]
+                                  )}
+                                >
+                                  {QUEST_STATUS_LABELS[note.questStatus || "lead"]}
+                                </Badge>
+                              )}
+                              {/* PRD-003 FR-5 (gap F19): reviewed sessions are marked */}
+                              {note.noteType === "session_log" && note.reviewedAt && (
+                                <CheckCircle2
+                                  className="h-3.5 w-3.5 text-green-500 flex-shrink-0"
+                                  aria-label="Session reviewed"
+                                />
+                              )}
                             </div>
+                            {/* M13: per-author sessions need a visible author */}
+                            {note.noteType === "session_log" &&
+                              note.authorId !== currentUserId &&
+                              authorNames?.[note.authorId] && (
+                                <div className="text-xs text-muted-foreground truncate">
+                                  by {authorNames[note.authorId]}
+                                </div>
+                              )}
+                            {/* M8: show why a content match surfaced this row */}
+                            {isSearching &&
+                              !note.title
+                                .toLowerCase()
+                                .includes(trimmedQuery.toLowerCase()) &&
+                              (() => {
+                                const snippet = matchSnippet(
+                                  note.content,
+                                  trimmedQuery
+                                );
+                                return snippet ? (
+                                  <div className="text-xs text-muted-foreground truncate">
+                                    {snippet}
+                                  </div>
+                                ) : null;
+                              })()}
                           </button>
                         </NotesItemPreview>
                       ))}

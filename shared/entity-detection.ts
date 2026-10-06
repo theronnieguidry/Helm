@@ -93,13 +93,21 @@ const QUEST_PATTERNS = [
   /\b(Quest|Mission|Task|Hunt|Search|Journey)\s+(?:for|to|of)\s+(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g,
   // "Find/Defeat/Retrieve the X" patterns
   /\b(Find|Defeat|Retrieve|Rescue|Discover|Destroy|Recover)\s+the\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g,
+  // PRD-002 FR-2: natural-prose action phrases ("we need to defeat the dragon",
+  // "asked us to find the artifact"). Case-insensitive; the trigger phrase stays
+  // outside the match via lookbehind so the suggestion text starts at the verb.
+  /(?<=\b(?:need(?:s)? to|asked (?:us|me|them) to|must|have to|has to|were told to)\s)(?:find|defeat|retrieve|rescue|discover|destroy|recover|investigate|escort)\s+(?:the\s+)?[a-z][^.!?\n,;:]{2,60}/gi,
 ];
 
 // Proper noun pattern (capitalized words not at sentence start)
 const PROPER_NOUN_PATTERN = /(?<=[.!?]\s+|^)([A-Z][a-z]+)|(?<=[a-z]\s)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g;
 
-function generateEntityId(): string {
-  return `entity-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+// PRD-022 FR-7/FR-9: IDs must be stable across detection runs so dismissed /
+// reclassified / created state persisted in localStorage keeps matching. Derive
+// the ID from the entity's identity instead of minting a random one per run.
+function generateEntityId(type: EntityType, normalizedText: string): string {
+  const slug = normalizedText.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "entity";
+  return `entity-${type}-${slug}`;
 }
 
 function normalizeText(text: string): string {
@@ -444,7 +452,7 @@ export function detectEntities(
       }
     } else {
       entityMap.set(normalized, {
-        id: generateEntityId(),
+        id: generateEntityId(match.type, normalized),
         type: match.type,
         text: match.text,
         normalizedText: normalized,

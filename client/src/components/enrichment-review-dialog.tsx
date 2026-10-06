@@ -140,8 +140,11 @@ export function EnrichmentReviewDialog({
       return response.json() as Promise<EnrichmentRunData>;
     },
     enabled: open && !!enrichmentRunId,
-    refetchInterval: (data) =>
-      data?.status === "running" || data?.status === "pending" ? 2000 : false,
+    // TanStack Query v5 passes the Query object (not data) to refetchInterval
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "running" || status === "pending" ? 2000 : false;
+    },
   });
 
   // Approve classification mutation

@@ -21,9 +21,12 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import type { Team, Note, GameSession, TeamMember, Invite, NoteType } from "@shared/schema";
+import type { Team, Note, GameSession, TeamMember, Invite, NoteType, User as UserProfile, UserAvailability, SessionOverride } from "@shared/schema";
 import { TEAM_TYPE_LABELS } from "@shared/schema";
-import { format, formatDistanceToNow } from "date-fns";
+import { format, formatDistanceToNow, addMonths } from "date-fns";
+import type { SessionCandidate } from "@shared/recurrence";
+import { getTeamTimezone, zonedDateKey } from "@shared/recurrence";
+import { computeAttendance, daysUntilCandidate } from "@shared/scheduling";
 
 interface DashboardContentProps {
   team: Team;
@@ -77,10 +80,89 @@ export default function DashboardContent({ team }: DashboardContentProps) {
   const currentInvite = invites?.[0];
   const isDM = members?.find(m => m.userId === user?.id)?.role === "dm";
 
-  const upcomingSessions = sessions
-    ?.filter(s => new Date(s.scheduledAt) > new Date())
+  // Audit S11: the dashboard used to read only manual sessions, so
+  // recurrence-based teams permanently saw "No upcoming sessions". It now
+  // computes the same candidates + attendance the schedule page does.
+  const rangeStart = new Date();
+  const rangeEnd = addMonths(rangeStart, 2);
+
+  const { data: candidatesData, isLoading: candidatesLoading } = useQuery<{
+    candidates: SessionCandidate[];
+    overrides: SessionOverride[];
+  }>({
+    queryKey: ["/api/teams", team.id, "session-candidates", format(rangeStart, "yyyy-MM")],
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/teams/${team.id}/session-candidates?startDate=${rangeStart.toISOString()}&endDate=${rangeEnd.toISOString()}`
+      );
+      return res.json();
+    },
+    enabled: !!team.id && !!team.recurrenceFrequency,
+  });
+
+  const { data: userAvailability } = useQuery<UserAvailability[]>({
+    queryKey: ["/api/teams", team.id, "user-availability", format(rangeStart, "yyyy-MM")],
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/teams/${team.id}/user-availability?startDate=${rangeStart.toISOString()}&endDate=${rangeEnd.toISOString()}`
+      );
+      return res.json();
+    },
+    enabled: !!team.id,
+  });
+
+  const { data: userProfile } = useQuery<UserProfile>({
+    queryKey: ["/api/user/profile"],
+  });
+  const userTimezone =
+    userProfile?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const formatInUserTz = (date: Date, options: Intl.DateTimeFormatOptions): string => {
+    try {
+      return date.toLocaleString("en-US", { ...options, timeZone: userTimezone });
+    } catch {
+      return date.toLocaleString("en-US", options);
+    }
+  };
+
+  // Manual one-off sessions, viewed through the candidate lens (audit S13)
+  const manualAsCandidates: SessionCandidate[] = (sessions ?? [])
+    .filter(s => s.isOverride)
+    .map(s => {
+      const scheduledAt = new Date(s.scheduledAt);
+      const duration = team.defaultSessionDurationMinutes || 180;
+      return {
+        occurrenceKey: zonedDateKey(scheduledAt, getTeamTimezone(team)),
+        scheduledAt,
+        endsAt: new Date(scheduledAt.getTime() + duration * 60 * 1000),
+        isOverridden: true,
+        status: s.status ?? "scheduled",
+      };
+    });
+
+  const allCandidates = [...(candidatesData?.candidates ?? []), ...manualAsCandidates];
+
+  const upcomingWithAttendance = allCandidates
+    .filter(c => new Date(c.scheduledAt) > new Date() && c.status === "scheduled")
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
+    .map(c => ({
+      candidate: c,
+      attendance: computeAttendance(c, members ?? [], userAvailability ?? [], team),
+    }))
+    .filter(({ attendance }) => isDM || attendance.isEligible || attendance.noResponse.length > 0)
     .slice(0, 3);
+
+  // "You haven't answered" banner: the next occurrence within two weeks that
+  // is still missing MY response (audit S11 — the dashboard is where the nag
+  // belongs when the member opens the app)
+  const needsMyResponse = upcomingWithAttendance.find(
+    ({ candidate, attendance }) =>
+      user?.id &&
+      attendance.noResponse.includes(user.id) &&
+      daysUntilCandidate(candidate, new Date(), team) <= 14
+  );
 
   const recentNotes = notes
     ?.filter(n => !n.isPrivate || n.authorId === user?.id)
@@ -117,6 +199,35 @@ export default function DashboardContent({ team }: DashboardContentProps) {
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
+      {/* Audit S11: zero-permission nag — the in-app counterpart of the push reminder */}
+      {needsMyResponse && (
+        <div
+          className="p-4 rounded-md border border-amber-500/40 bg-amber-500/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          data-testid="availability-nag-banner"
+        >
+          <div className="flex items-center gap-3">
+            <Calendar className="h-5 w-5 text-amber-600 flex-shrink-0" />
+            <p className="text-sm">
+              <span className="font-medium">
+                Are you in for{" "}
+                {formatInUserTz(new Date(needsMyResponse.candidate.scheduledAt), {
+                  weekday: "long",
+                  month: "short",
+                  day: "numeric",
+                })}
+                ?
+              </span>{" "}
+              <span className="text-muted-foreground">
+                The group is waiting on your availability.
+              </span>
+            </p>
+          </div>
+          <Button size="sm" onClick={() => navigate("/schedule")} data-testid="button-answer-availability">
+            Answer now
+          </Button>
+        </div>
+      )}
+
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-medium">{team.name}</h1>
@@ -204,19 +315,21 @@ export default function DashboardContent({ team }: DashboardContentProps) {
             </Button>
           </CardHeader>
           <CardContent>
-            {sessionsLoading ? (
+            {sessionsLoading || candidatesLoading ? (
               <div className="space-y-3">
                 {[1, 2, 3].map(i => (
                   <Skeleton key={i} className="h-16 w-full" />
                 ))}
               </div>
-            ) : upcomingSessions && upcomingSessions.length > 0 ? (
+            ) : upcomingWithAttendance.length > 0 ? (
               <div className="space-y-3">
-                {upcomingSessions.map(session => (
-                  <div 
-                    key={session.id} 
-                    className="flex items-center justify-between p-3 rounded-md bg-muted/50"
-                    data-testid={`session-${session.id}`}
+                {upcomingWithAttendance.map(({ candidate, attendance }) => (
+                  <button
+                    key={candidate.occurrenceKey}
+                    type="button"
+                    onClick={() => navigate("/schedule")}
+                    className="w-full flex items-center justify-between p-3 rounded-md bg-muted/50 text-left hover-elevate transition-all"
+                    data-testid={`session-${candidate.occurrenceKey}`}
                   >
                     <div className="flex items-center gap-3">
                       <div className="h-10 w-10 rounded-md bg-primary/10 flex items-center justify-center">
@@ -224,35 +337,46 @@ export default function DashboardContent({ team }: DashboardContentProps) {
                       </div>
                       <div>
                         <p className="font-medium">
-                          {format(new Date(session.scheduledAt), "EEEE, MMMM d")}
+                          {formatInUserTz(new Date(candidate.scheduledAt), {
+                            weekday: "long",
+                            month: "long",
+                            day: "numeric",
+                          })}
                         </p>
                         <p className="text-sm text-muted-foreground">
-                          {format(new Date(session.scheduledAt), "h:mm a")}
+                          {formatInUserTz(new Date(candidate.scheduledAt), {
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}
+                          {" · "}
+                          {attendance.eligibleCount}/{attendance.threshold} in
+                          {attendance.noResponse.length > 0 &&
+                            ` · awaiting ${attendance.noResponse.length}`}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <Clock className="h-4 w-4 text-muted-foreground" />
                       <span className="text-sm text-muted-foreground">
-                        {formatDistanceToNow(new Date(session.scheduledAt), { addSuffix: true })}
+                        {formatDistanceToNow(new Date(candidate.scheduledAt), { addSuffix: true })}
                       </span>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             ) : (
               <div className="text-center py-8 text-muted-foreground">
                 <Calendar className="h-12 w-12 mx-auto mb-3 opacity-50" />
-                <p>No upcoming sessions</p>
+                <p>{team.recurrenceFrequency ? "No upcoming sessions yet" : "No schedule set"}</p>
                 {isDM && (
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
+                  <Button
+                    variant="outline"
+                    size="sm"
                     className="mt-3"
-                    onClick={() => navigate("/schedule")}
+                    onClick={() => navigate(team.recurrenceFrequency ? "/schedule" : "/settings")}
                     data-testid="button-schedule-session"
                   >
-                    Schedule Session
+                    {team.recurrenceFrequency ? "Open Schedule" : "Set a Schedule"}
                   </Button>
                 )}
               </div>

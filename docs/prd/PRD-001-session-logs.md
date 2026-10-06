@@ -165,3 +165,17 @@ interface ContentBlock {
 1. Should session logs support collaborative editing (multiple authors same session)?
 2. Should we support merging multiple session logs from the same date?
 3. Rich text formatting requirements (bold, italic, headers)?
+
+
+---
+
+## Amendment (2026-07-06) — offset-based traceability supersedes the block substrate
+
+FR-3's `ContentBlock[]` storage shipped at the schema/API level but the production editor
+captures plain text; real sessions have `contentBlocks: null`. Per the done-ness report
+(P2-2 decision), per-block traceability is formally superseded by an **offset-based model**:
+backlinks store snippet + start/end character offsets into the note's plain-text content
+(PRD-047), reference navigation scrolls to and selects the mention via those offsets
+(PRD-005 amendment), and offsets/snippets are re-indexed on content edits
+(`server/backlink-reindex.ts`). The `contentBlocks` column remains for API compatibility
+but is no longer the planned substrate.

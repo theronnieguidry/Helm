@@ -244,6 +244,118 @@ describe("AI Cache", () => {
     });
   });
 
+  describe("Relationship Cache Operations", () => {
+    const teamId = "team-123";
+
+    // P0-3 regression: setRelationship used to store only a 100-char content
+    // prefix (_cachedFromContent) while getRelationship compared against the
+    // full normalized content hash, so for any note longer than 100 chars the
+    // hashes never matched and cached directional relationships were returned
+    // reversed. The fix stores _cachedFromKeyHash (the full normalized hash,
+    // computed with the same function the getter uses). The legacy
+    // title/content-prefix fallback was intentionally NOT kept: the fix also
+    // bumps the relationship algorithm version to 1.1.0, and since the version
+    // is part of the cache lookup key, old 1.0.0 entries can never be loaded —
+    // making a fallback dead code and the version bump the simpler safe choice.
+    const longNoteA: NoteWithClassification = {
+      id: "note-quest",
+      title: "The Sunken Crown",
+      content:
+        "The party has been tasked with recovering the Sunken Crown from the " +
+        "flooded ruins beneath Lake Veyra. The crown once belonged to the " +
+        "drowned king Aldemar, and local legends claim it grants dominion over " +
+        "the waters. Captain Garner warned them about the cultists who guard " +
+        "the ruins and the strange lights seen beneath the surface at night.",
+      inferredType: "Quest",
+      internalLinks: [],
+    };
+
+    const longNoteB: NoteWithClassification = {
+      id: "note-npc",
+      title: "Captain Garner",
+      content:
+        "A grizzled veteran who commands the town guard of Veyra's Rest. " +
+        "Garner lost his left eye during the border wars and wears a bronze " +
+        "patch etched with the sigil of his old regiment. He distrusts " +
+        "adventurers but pays well for information about the cult activity " +
+        "near the lake, and he keeps a detailed ledger of every stranger who " +
+        "passes through the town gates.",
+      inferredType: "NPC",
+      internalLinks: [],
+    };
+
+    const directionalResult: RelationshipResult = {
+      fromNoteId: "note-quest",
+      toNoteId: "note-npc",
+      relationshipType: "QuestHasNPC",
+      confidence: 0.9,
+      evidenceSnippet: "Captain Garner warned them about the cultists",
+      evidenceType: "Mention",
+    };
+
+    it("returns null for cache miss", async () => {
+      const result = await cache.getRelationship(longNoteA, longNoteB, teamId);
+      expect(result).toBeNull();
+    });
+
+    it("preserves direction for long notes when lookup order matches stored order", async () => {
+      // Both notes have >200 chars of content, which broke the old
+      // prefix-based direction check and caused an unconditional swap.
+      expect(longNoteA.content.length).toBeGreaterThan(200);
+      expect(longNoteB.content.length).toBeGreaterThan(200);
+
+      await cache.setRelationship(longNoteA, longNoteB, directionalResult, teamId);
+
+      const result = await cache.getRelationship(longNoteA, longNoteB, teamId);
+
+      expect(result).not.toBeNull();
+      expect(result?.relationshipType).toBe("QuestHasNPC");
+      // Direction must NOT be swapped: A was the "from" side when stored
+      expect(result?.fromNoteId).toBe(longNoteA.id);
+      expect(result?.toNoteId).toBe(longNoteB.id);
+    });
+
+    it("maps direction back to stored order when lookup order is reversed", async () => {
+      await cache.setRelationship(longNoteA, longNoteB, directionalResult, teamId);
+
+      // Look up with (B, A) — the order-independent pair hash still hits,
+      // and the direction must map back to A->B via the caller's note ids
+      const result = await cache.getRelationship(longNoteB, longNoteA, teamId);
+
+      expect(result).not.toBeNull();
+      expect(result?.relationshipType).toBe("QuestHasNPC");
+      expect(result?.fromNoteId).toBe(longNoteA.id);
+      expect(result?.toNoteId).toBe(longNoteB.id);
+    });
+
+    it("maps to current note ids when notes are re-imported with new ids", async () => {
+      await cache.setRelationship(longNoteA, longNoteB, directionalResult, teamId);
+
+      const reimportedA = { ...longNoteA, id: "note-quest-v2" };
+      const reimportedB = { ...longNoteB, id: "note-npc-v2" };
+
+      const result = await cache.getRelationship(reimportedA, reimportedB, teamId);
+
+      expect(result).not.toBeNull();
+      expect(result?.fromNoteId).toBe("note-quest-v2");
+      expect(result?.toNoteId).toBe("note-npc-v2");
+    });
+
+    it("misses cache when team ID differs", async () => {
+      await cache.setRelationship(longNoteA, longNoteB, directionalResult, teamId);
+      const result = await cache.getRelationship(longNoteA, longNoteB, "different-team");
+      expect(result).toBeNull();
+    });
+
+    it("does not leak direction metadata in the returned result", async () => {
+      await cache.setRelationship(longNoteA, longNoteB, directionalResult, teamId);
+      const result = await cache.getRelationship(longNoteA, longNoteB, teamId);
+
+      expect(result).not.toBeNull();
+      expect(result).not.toHaveProperty("_cachedFromKeyHash");
+    });
+  });
+
   describe("Invalidation", () => {
     const teamId = "team-123";
     const pcNames: string[] = [];

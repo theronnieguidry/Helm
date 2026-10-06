@@ -8,12 +8,51 @@ import {
   type TeamType,
   type AvailabilityStatus,
   type SessionStatus,
+  type NoteType,
   type RelationshipType,
   type EvidenceType,
 } from "@shared/schema";
 import { generateSessionCandidates } from "@shared/recurrence";
 import { buildCleanupSuggestions, type CleanupSuggestionMode } from "@shared/cleanup-suggestions";
 import { canonicalizeSourceBlockId } from "@shared/text-hash";
+import { canViewNote, filterVisibleNotes } from "../note-visibility";
+import {
+  makeListNotesHandler,
+  makeTodaySessionHandler,
+  makeNeedsReviewHandler,
+  makeCreateNoteHandler,
+  makeUpdateNoteHandler,
+  makeDeleteNoteHandler,
+} from "../notes-handlers";
+import {
+  makeGetSessionsHandler,
+  makeCreateSessionHandler,
+  makeUpdateSessionStatusHandler,
+  makeGetLegacyAvailabilityHandler,
+  makeUpsertLegacyAvailabilityHandler,
+  makeGetUserAvailabilityHandler,
+  makeCreateUserAvailabilityHandler,
+  makeUpdateUserAvailabilityHandler,
+  makeDeleteUserAvailabilityHandler,
+  makeSessionCandidatesHandler,
+  makeUpsertSessionOverrideHandler,
+  makeGetSessionOverridesHandler,
+  makeDeleteSessionOverrideHandler,
+} from "../scheduling-handlers";
+import {
+  makePushPublicKeyHandler,
+  makeSavePushSubscriptionHandler,
+  makeDeletePushSubscriptionHandler,
+  makeListNotificationsHandler,
+  makeMarkNotificationsReadHandler,
+  makeUpdateNotificationPrefsHandler,
+} from "../notification-handlers";
+import {
+  sessionAudioUpload,
+  makeSessionRecordingUploadHandler,
+  makeSessionRecordingStatusHandler,
+  makeSessionRecordingConfigHandler,
+} from "../audio/session-audio-handlers";
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -34,10 +73,6 @@ function rollDice(sides: number, count: number): number[] {
 
 const RELATIONSHIP_TYPE_SET = new Set<RelationshipType>(RELATIONSHIP_TYPES);
 const EVIDENCE_TYPE_SET = new Set<EvidenceType>(EVIDENCE_TYPES);
-
-function canViewNote(note: { isPrivate: boolean | null; authorId: string }, userId: string, role: "dm" | "member"): boolean {
-  return !note.isPrivate || note.authorId === userId || role === "dm";
-}
 
 function getSessionContent(note: { content?: string | null; contentBlocks?: Array<{ content: string }> | null }): string {
   if (note.content && note.content.trim().length > 0) {
@@ -146,7 +181,23 @@ export async function registerTestRoutes(
         return res.status(403).json({ message: "Only admin can update team" });
       }
 
-      const team = await storage.updateTeam(id, req.body);
+      // Audit S7: same allow-list as production
+      const body = req.body ?? {};
+      const updateData: Record<string, unknown> = {};
+      for (const field of [
+        "name", "teamType", "diceMode", "recurrenceFrequency", "dayOfWeek",
+        "daysOfMonth", "startTime", "timezone", "minAttendanceThreshold",
+        "defaultSessionDurationMinutes",
+      ]) {
+        if (field in body) updateData[field] = body[field];
+      }
+      if ("recurrenceAnchorDate" in body) {
+        updateData.recurrenceAnchorDate = body.recurrenceAnchorDate
+          ? new Date(body.recurrenceAnchorDate)
+          : null;
+      }
+
+      const team = await storage.updateTeam(id, updateData);
       res.json(team);
     } catch (error) {
       res.status(500).json({ message: "Failed to update team" });
@@ -276,57 +327,87 @@ export async function registerTestRoutes(
     }
   });
 
-  app.get("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const notes = await storage.getNotes(teamId);
-      const filtered = notes.filter(n => !n.isPrivate || n.authorId === userId);
-      res.json(filtered);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch notes" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes", isAuthenticated, makeListNotesHandler(storage));
 
   // PRD-019: Get today's session note
-  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const todaySession = await storage.findSessionByDate(teamId, new Date());
-      res.json(todaySession ?? null);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch today's session" });
-    }
-  });
+  app.get("/api/teams/:teamId/notes/today-session", isAuthenticated, makeTodaySessionHandler(storage));
 
   // PRD-037: Get notes needing review (low-confidence AI classifications)
-  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, async (req: any, res) => {
+  app.get("/api/teams/:teamId/notes/needs-review", isAuthenticated, makeNeedsReviewHandler(storage));
+
+  // PRD-037/PRD-038: Approve/reject/reclassify a low-confidence classification
+  // (mirrors production route in server/routes.ts, including the P0-1/F81 privacy guard)
+  app.patch("/api/teams/:teamId/classifications/:classificationId", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
-      const { teamId } = req.params;
+      const { teamId, classificationId } = req.params;
+      const { status, overrideType } = req.body;
+
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const validTypes = ["Character", "NPC", "Area", "POI", "Quest", "SessionLog", "Note"];
+      if (overrideType && !validTypes.includes(overrideType)) {
+        return res.status(400).json({ message: "Invalid override type" });
+      }
 
       const member = await storage.getTeamMember(teamId, userId);
       if (!member) {
         return res.status(403).json({ message: "Not a team member" });
       }
 
-      const items = await storage.getPendingLowConfidenceClassifications(teamId);
-      res.json({ items, count: items.length });
+      // Get classification to verify team ownership (via this team's enrichment runs)
+      const allEnrichmentRuns = await Promise.all(
+        (await storage.getImportRuns(teamId)).map((ir) =>
+          storage.getEnrichmentRunByImportId(ir.id)
+        )
+      );
+
+      type StoredClassification = Awaited<ReturnType<typeof storage.getNoteClassificationsByEnrichmentRun>>[number];
+      let classification: StoredClassification | undefined;
+      for (const er of allEnrichmentRuns) {
+        if (!er) continue;
+        const erClassifications = await storage.getNoteClassificationsByEnrichmentRun(er.id);
+        const match = erClassifications.find((c) => c.id === classificationId);
+        if (match) {
+          classification = match;
+          break;
+        }
+      }
+
+      if (!classification) {
+        return res.status(404).json({ message: "Classification not found" });
+      }
+
+      // P0-1 (F81): members must not approve/reject/reclassify classifications
+      // belonging to another author's private note. 404 to avoid confirming existence.
+      const classifiedNote = await storage.getNote(classification.noteId);
+      if (!classifiedNote || classifiedNote.teamId !== teamId || !canViewNote(classifiedNote, userId, member.role)) {
+        return res.status(404).json({ message: "Classification not found" });
+      }
+
+      const updated = await storage.updateNoteClassificationStatus(classificationId, status, userId);
+
+      // If approved, update the note's type (PRD-038: overrideType wins)
+      if (status === "approved") {
+        const noteTypeMap: Record<string, string> = {
+          Character: "character",
+          NPC: "npc",
+          Area: "area",
+          POI: "poi",
+          Quest: "quest",
+          SessionLog: "session_log",
+          Note: "note",
+        };
+        const typeToUse = overrideType || updated.inferredType;
+        const newNoteType = noteTypeMap[typeToUse] || "note";
+        await storage.updateNote(updated.noteId, { noteType: newNoteType as NoteType });
+      }
+
+      res.json(updated);
     } catch (error) {
-      res.status(500).json({ message: "Failed to fetch needs-review items" });
+      res.status(500).json({ message: "Failed to update classification" });
     }
   });
 
@@ -372,20 +453,42 @@ export async function registerTestRoutes(
         }
       }
 
-      const normalizedReferencesIn = referencesIn.map((reference) => {
-        const sourceNote = relatedById.get(reference.sourceNoteId);
-        const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
-        return {
-          ...reference,
-          sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
-          sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
-          sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
-          textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
-          snippetPreview: sourceVisible
-            ? toSnippetPreview(reference.textSnippet, "")
-            : "Referenced in a private note",
-        };
-      });
+      // PRD-048 FR-1b: include author names for reference entries
+      const teamMembersWithUsers = await storage.getTeamMembers(teamId);
+      const memberNameByUserId = new Map<string, string>();
+      for (const teamMember of teamMembersWithUsers) {
+        const name = [teamMember.user?.firstName, teamMember.user?.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        memberNameByUserId.set(teamMember.userId, name || teamMember.user?.email || "Unknown");
+      }
+
+      const normalizedReferencesIn = referencesIn
+        .map((reference) => {
+          const sourceNote = relatedById.get(reference.sourceNoteId);
+          const sourceVisible = sourceNote ? canViewNote(sourceNote, userId, member.role) : false;
+          return {
+            ...reference,
+            sourceNoteTitle: sourceVisible ? sourceNote?.title ?? null : null,
+            sourceNoteType: sourceVisible ? sourceNote?.noteType ?? null : null,
+            sourceNoteIsPrivate: sourceNote?.isPrivate ?? false,
+            sourceNoteSessionDate: sourceVisible ? sourceNote?.sessionDate ?? null : null,
+            createdByName: reference.createdByUserId
+              ? memberNameByUserId.get(reference.createdByUserId) ?? null
+              : null,
+            textSnippet: sourceVisible ? reference.textSnippet : "Referenced in a private note",
+            snippetPreview: sourceVisible
+              ? toSnippetPreview(reference.textSnippet, "")
+              : "Referenced in a private note",
+          };
+        })
+        // PRD-048 FR-2: order by most recent session date, then creation time
+        .sort((a, b) => {
+          const aDate = a.sourceNoteSessionDate ?? a.createdAt;
+          const bDate = b.sourceNoteSessionDate ?? b.createdAt;
+          return new Date(bDate ?? 0).getTime() - new Date(aDate ?? 0).getTime();
+        });
 
       const normalizedReferencesOut = referencesOut.map((reference) => {
         const targetNote = relatedById.get(reference.targetNoteId);
@@ -501,205 +604,18 @@ export async function registerTestRoutes(
     }
   });
 
-  app.post("/api/teams/:teamId/notes", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { title, content, noteType, isPrivate, questStatus, contentBlocks, sessionDate, linkedNoteIds } = req.body;
+  app.post("/api/teams/:teamId/notes", isAuthenticated, makeCreateNoteHandler(storage));
 
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
+  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeUpdateNoteHandler(storage));
 
-      // PRD-023: For session_log type, check if one already exists for the given date (idempotency)
-      if (noteType === "session_log" && sessionDate) {
-        const existing = await storage.findSessionByDate(teamId, new Date(sessionDate));
-        if (existing) {
-          // Return existing session instead of creating duplicate
-          return res.status(200).json(existing);
-        }
-      }
+  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, makeDeleteNoteHandler(storage));
 
-      const note = await storage.createNote({
-        teamId,
-        authorId: userId,
-        title,
-        content,
-        noteType,
-        isPrivate,
-        questStatus,
-        contentBlocks,
-        sessionDate: sessionDate ? new Date(sessionDate) : undefined,
-        linkedNoteIds,
-      });
-      res.json(note);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to create note" });
-    }
-  });
-
-  app.patch("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const note = await storage.getNote(noteId);
-      if (!note || note.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (note.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Can only edit your own notes" });
-      }
-
-      const updated = await storage.updateNote(noteId, req.body);
-      res.json(updated);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update note" });
-    }
-  });
-
-  app.delete("/api/teams/:teamId/notes/:noteId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, noteId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const note = await storage.getNote(noteId);
-      if (!note || note.teamId !== teamId) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-
-      if (note.authorId !== userId && member.role !== "dm") {
-        return res.status(403).json({ message: "Can only delete your own notes" });
-      }
-
-      await storage.deleteNote(noteId);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete note" });
-    }
-  });
-
-  app.get("/api/teams/:teamId/sessions", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const sessions = await storage.getSessions(teamId);
-      res.json(sessions);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch sessions" });
-    }
-  });
-
-  app.post("/api/teams/:teamId/sessions", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { scheduledAt } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Only admin can create sessions" });
-      }
-
-      const session = await storage.createSession({
-        teamId,
-        scheduledAt: new Date(scheduledAt),
-      });
-      res.json(session);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to create session" });
-    }
-  });
-
-  // Update session status (PRD-010)
-  app.patch("/api/teams/:teamId/sessions/:sessionId", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, sessionId } = req.params;
-      const { status } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized - DM only" });
-      }
-
-      const session = await storage.getSession(sessionId);
-      if (!session || session.teamId !== teamId) {
-        return res.status(404).json({ message: "Session not found" });
-      }
-
-      if (!["scheduled", "canceled"].includes(status)) {
-        return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
-      }
-
-      const updated = await storage.updateSession(sessionId, { status });
-      res.json(updated);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update session" });
-    }
-  });
-
-  app.get("/api/teams/:teamId/availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const availability = await storage.getAvailability(teamId);
-      res.json(availability);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch availability" });
-    }
-  });
-
-  app.post("/api/teams/:teamId/sessions/:sessionId/availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, sessionId } = req.params;
-      const { status } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const validStatuses: AvailabilityStatus[] = ["available", "maybe", "busy"];
-      if (!validStatuses.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
-      }
-
-      const availability = await storage.upsertAvailability({
-        sessionId,
-        userId,
-        status,
-      });
-      res.json(availability);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update availability" });
-    }
-  });
+  // Scheduling routes: shared handlers registered by BOTH routers (audit S8)
+  app.get("/api/teams/:teamId/sessions", isAuthenticated, makeGetSessionsHandler(storage));
+  app.post("/api/teams/:teamId/sessions", isAuthenticated, makeCreateSessionHandler(storage));
+  app.patch("/api/teams/:teamId/sessions/:sessionId", isAuthenticated, makeUpdateSessionStatusHandler(storage));
+  app.get("/api/teams/:teamId/availability", isAuthenticated, makeGetLegacyAvailabilityHandler(storage));
+  app.post("/api/teams/:teamId/sessions/:sessionId/availability", isAuthenticated, makeUpsertLegacyAvailabilityHandler(storage));
 
   app.get("/api/teams/:teamId/dice-rolls", isAuthenticated, async (req: any, res) => {
     try {
@@ -1167,224 +1083,36 @@ export async function registerTestRoutes(
     }
   });
 
-  // User Availability (PRD-009) - date-based personal availability
-  app.get("/api/teams/:teamId/user-availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { startDate, endDate } = req.query;
+  // User Availability (PRD-009) + Session Candidates/Overrides (PRD-010A):
+  // shared handlers registered by BOTH routers (audit S8/S6)
+  app.get("/api/teams/:teamId/user-availability", isAuthenticated, makeGetUserAvailabilityHandler(storage));
+  app.post("/api/teams/:teamId/user-availability", isAuthenticated, makeCreateUserAvailabilityHandler(storage));
+  app.patch("/api/teams/:teamId/user-availability/:id", isAuthenticated, makeUpdateUserAvailabilityHandler(storage));
+  app.delete("/api/teams/:teamId/user-availability/:id", isAuthenticated, makeDeleteUserAvailabilityHandler(storage));
+  app.get("/api/teams/:teamId/session-candidates", isAuthenticated, makeSessionCandidatesHandler(storage));
+  app.post("/api/teams/:teamId/session-overrides", isAuthenticated, makeUpsertSessionOverrideHandler(storage));
+  app.get("/api/teams/:teamId/session-overrides", isAuthenticated, makeGetSessionOverridesHandler(storage));
+  app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, makeDeleteSessionOverrideHandler(storage));
 
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
+  // Session recordings (PRD-053)
+  app.get("/api/session-recordings/config", isAuthenticated, makeSessionRecordingConfigHandler());
+  app.post(
+    "/api/teams/:teamId/session-recordings",
+    isAuthenticated,
+    sessionAudioUpload.single("recording"),
+    makeSessionRecordingUploadHandler(storage)
+  );
+  app.get(
+    "/api/teams/:teamId/session-recordings/:operationId/status",
+    isAuthenticated,
+    makeSessionRecordingStatusHandler(storage)
+  );
 
-      if (!startDate || !endDate) {
-        return res.status(400).json({ message: "startDate and endDate query parameters are required" });
-      }
-
-      const availability = await storage.getUserAvailability(
-        teamId,
-        new Date(startDate as string),
-        new Date(endDate as string)
-      );
-      res.json(availability);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch user availability" });
-    }
-  });
-
-  app.post("/api/teams/:teamId/user-availability", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { date, startTime, endTime } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      // Validate time format (HH:MM)
-      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
-      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
-        return res.status(400).json({ message: "Invalid time format. Use HH:MM" });
-      }
-
-      // Check for existing availability on this date
-      const existingAvailability = await storage.getUserAvailabilityByDate(teamId, userId, new Date(date));
-      if (existingAvailability) {
-        return res.status(409).json({ message: "Availability already exists for this date. Use PATCH to update." });
-      }
-
-      const availability = await storage.createUserAvailability({
-        teamId,
-        userId,
-        date: new Date(date),
-        startTime,
-        endTime,
-      });
-
-      res.json(availability);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to create user availability" });
-    }
-  });
-
-  app.patch("/api/teams/:teamId/user-availability/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, id } = req.params;
-      const { startTime, endTime } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      // Validate time format if provided
-      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
-      if (startTime && !timeRegex.test(startTime)) {
-        return res.status(400).json({ message: "Invalid startTime format. Use HH:MM" });
-      }
-      if (endTime && !timeRegex.test(endTime)) {
-        return res.status(400).json({ message: "Invalid endTime format. Use HH:MM" });
-      }
-
-      const updateData: { startTime?: string; endTime?: string } = {};
-      if (startTime) updateData.startTime = startTime;
-      if (endTime) updateData.endTime = endTime;
-
-      const availability = await storage.updateUserAvailability(id, updateData);
-      res.json(availability);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update user availability" });
-    }
-  });
-
-  app.delete("/api/teams/:teamId/user-availability/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, id } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      await storage.deleteUserAvailability(id);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete user availability" });
-    }
-  });
-
-  // Session Candidates (PRD-010A) - auto-generated sessions from recurrence
-  app.get("/api/teams/:teamId/session-candidates", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { startDate, endDate } = req.query;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      if (!startDate || !endDate) {
-        return res.status(400).json({ message: "startDate and endDate query parameters are required" });
-      }
-
-      const team = await storage.getTeam(teamId);
-      if (!team) {
-        return res.status(404).json({ message: "Team not found" });
-      }
-
-      // Get any overrides for this team
-      const overrides = await storage.getSessionOverrides(teamId);
-
-      // Generate candidates from recurrence settings
-      const candidates = generateSessionCandidates(
-        team,
-        new Date(startDate as string),
-        new Date(endDate as string),
-        overrides
-      );
-
-      res.json({ candidates, overrides });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch session candidates" });
-    }
-  });
-
-  // Session Overrides (PRD-010A) - DM overrides for auto-generated sessions
-  app.post("/api/teams/:teamId/session-overrides", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-      const { occurrenceKey, status, scheduledAtOverride } = req.body;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized - DM only" });
-      }
-
-      if (!occurrenceKey) {
-        return res.status(400).json({ message: "occurrenceKey is required" });
-      }
-
-      // Validate status if provided
-      if (status && !SESSION_STATUSES.includes(status as SessionStatus)) {
-        return res.status(400).json({ message: "Invalid status. Must be 'scheduled' or 'canceled'" });
-      }
-
-      const override = await storage.upsertSessionOverride({
-        teamId,
-        occurrenceKey,
-        status: status || "scheduled",
-        scheduledAtOverride: scheduledAtOverride ? new Date(scheduledAtOverride) : null,
-        updatedBy: userId,
-      });
-
-      res.json(override);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to create session override" });
-    }
-  });
-
-  // Get session overrides for a team (PRD-010A)
-  app.get("/api/teams/:teamId/session-overrides", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member) {
-        return res.status(403).json({ message: "Not a team member" });
-      }
-
-      const overrides = await storage.getSessionOverrides(teamId);
-      res.json(overrides);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch session overrides" });
-    }
-  });
-
-  // Delete session override (PRD-010A) - reinstates the session to default behavior
-  app.delete("/api/teams/:teamId/session-overrides/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const { teamId, id } = req.params;
-
-      const member = await storage.getTeamMember(teamId, userId);
-      if (!member || member.role !== "dm") {
-        return res.status(403).json({ message: "Not authorized - DM only" });
-      }
-
-      await storage.deleteSessionOverride(id);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete session override" });
-    }
-  });
+  // Push + notifications (scheduling audit stage 3)
+  app.get("/api/push/public-key", isAuthenticated, makePushPublicKeyHandler());
+  app.post("/api/push/subscriptions", isAuthenticated, makeSavePushSubscriptionHandler(storage));
+  app.delete("/api/push/subscriptions", isAuthenticated, makeDeletePushSubscriptionHandler(storage));
+  app.get("/api/notifications", isAuthenticated, makeListNotificationsHandler(storage));
+  app.post("/api/notifications/mark-read", isAuthenticated, makeMarkNotificationsReadHandler(storage));
+  app.patch("/api/teams/:teamId/members/me/notification-prefs", isAuthenticated, makeUpdateNotificationPrefsHandler(storage));
 }

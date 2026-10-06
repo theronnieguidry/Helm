@@ -64,7 +64,9 @@ export function AIPaywallStubDialog({
 
   const handleEnableAI = () => {
     onOpenChange(false);
-    setLocation(`/teams/${teamId}/settings`);
+    // Gap F56 (PRD-031 FR-3): Settings is registered at /settings; the old
+    // /teams/:id/settings path matched no route and landed on the 404 page.
+    setLocation("/settings");
   };
 
   const handleContinueWithoutAI = () => {

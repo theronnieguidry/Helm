@@ -228,3 +228,16 @@ const statusFilters = ['all', 'lead', 'todo', 'active', 'done', 'abandoned'];
 2. Should there be XP or completion rewards tied to quest status?
 3. Should "done" quests require completion notes or stay optional?
 4. Allow custom statuses beyond the five defined?
+
+
+---
+
+## Amendment (2026-07-06) — status visibility shipped; strict transitions intentionally omitted
+
+FR-5's user-facing surface now exists: quest rows in the Notes left panel show a colored
+status badge, the Quests section has status filter chips (All/Lead/To Do/Active/Done/
+Abandoned), the hover preview shows status, and new quests default to `lead` in the shared
+create handler (production parity with the test storage). The strict FR-2 transition graph
+(e.g. rejecting lead→done) is deliberately NOT enforced — a hard state machine conflicts
+with the capture-first philosophy (roadmap §8); revisit only if invalid jumps cause real
+problems.

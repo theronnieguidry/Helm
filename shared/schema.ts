@@ -127,6 +127,10 @@ export const teamMembers = pgTable("team_members", {
   // PRD-028: Per-member AI features toggle
   aiEnabled: boolean("ai_enabled").default(false).notNull(),
   aiEnabledAt: timestamp("ai_enabled_at"),
+  // Scheduling audit stage 3: per-member, per-team notification preferences
+  notifyAvailabilityReminders: boolean("notify_availability_reminders").default(true).notNull(),
+  notifyGroupAwaiting: boolean("notify_group_awaiting").default(true).notNull(),
+  notifyGameDay: boolean("notify_game_day").default(true).notNull(),
   joinedAt: timestamp("joined_at").defaultNow(),
 });
 
@@ -150,7 +154,7 @@ export const QUEST_STATUSES = ["lead", "todo", "active", "done", "abandoned"] as
 export type QuestStatus = typeof QUEST_STATUSES[number];
 
 // Import run status (PRD-015A)
-export const IMPORT_RUN_STATUSES = ["completed", "failed", "deleted"] as const;
+export const IMPORT_RUN_STATUSES = ["pending", "completed", "failed", "deleted"] as const;
 export type ImportRunStatus = typeof IMPORT_RUN_STATUSES[number];
 
 // Import visibility options (PRD-015A)
@@ -213,6 +217,8 @@ export const notes = pgTable("notes", {
   contentBlocks: json("content_blocks").$type<ContentBlock[]>(),
   // PRD-004: Quest status field
   questStatus: text("quest_status").$type<QuestStatus>(),
+  // PRD-003 FR-5 (gap F19): set when a session log has been marked reviewed
+  reviewedAt: timestamp("reviewed_at"),
   // PRD-015: Import tracking fields
   sourceSystem: text("source_system"), // e.g., "NUCLINO"
   sourcePageId: text("source_page_id"), // e.g., 8-char hex ID from Nuclino filename
@@ -225,9 +231,9 @@ export const notes = pgTable("notes", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => [
-  // PRD-023: enforce one session log per team per calendar day
+  // PRD-023 (revised for MVP audit M1): enforce one session log per author per team per calendar day
   uniqueIndex("notes_unique_session_per_day")
-    .on(table.teamId, sql`DATE(${table.sessionDate})`)
+    .on(table.teamId, table.authorId, sql`DATE(${table.sessionDate})`)
     .where(sql`${table.noteType} = 'session_log'`),
 ]);
 
@@ -268,17 +274,29 @@ export const diceRolls = pgTable("dice_rolls", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// User Availability (PRD-009) - date-based personal availability
+// User Availability (PRD-009) - date-based personal availability.
+// Scheduling audit S1: a row is a RESPONSE — either an available time window
+// (team-timezone HH:MM) or an explicit "unavailable". Absence of a row means
+// "hasn't responded", which is what the reminder engine keys on.
+export const USER_AVAILABILITY_STATUS = ["available", "unavailable"] as const;
+export type UserAvailabilityStatus = typeof USER_AVAILABILITY_STATUS[number];
+
 export const userAvailability = pgTable("user_availability", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   teamId: varchar("team_id").notNull(),
   userId: varchar("user_id").notNull(),
+  // Normalized to UTC midnight of the calendar day (audit S5/S14)
   date: timestamp("date").notNull(),
-  startTime: text("start_time").notNull(), // HH:MM format
-  endTime: text("end_time").notNull(),     // HH:MM format
+  status: text("status").notNull().$type<UserAvailabilityStatus>().default("available"),
+  startTime: text("start_time"), // HH:MM, team timezone; null when unavailable
+  endTime: text("end_time"),     // HH:MM, team timezone; null when unavailable
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => [
+  // Audit S14: one response per member per day — replaces the racy
+  // read-then-409 as the real guarantee
+  uniqueIndex("user_availability_unique_user_date").on(table.teamId, table.userId, table.date),
+]);
 
 // Backlinks table (PRD-005)
 export const backlinks = pgTable("backlinks", {
@@ -292,6 +310,52 @@ export const backlinks = pgTable("backlinks", {
   endOffset: integer("end_offset"),
   evidenceType: text("evidence_type").notNull().$type<EvidenceType>().default("Mention"),
   confidence: real("confidence").default(0.8),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Push Subscriptions (scheduling audit stage 3): one row per browser/device
+// that granted notification permission. Endpoint is globally unique per the
+// Web Push spec.
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  endpoint: text("endpoint").notNull().unique(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at").defaultNow(),
+  lastSeenAt: timestamp("last_seen_at").defaultNow(),
+});
+
+// Notification types the reminder engine and event triggers emit
+export const NOTIFICATION_TYPES = [
+  "availability_reminder",   // to a non-respondent: "are you in for Saturday?"
+  "group_awaiting",          // digest to responders: "still waiting on Alice, Bob"
+  "session_confirmed",       // everyone answered / threshold locked in
+  "threshold_unreachable",   // to the DM: session mathematically dead
+  "game_day",                // noon-of-session: "game is on today at 7"
+  "session_canceled",        // DM canceled an occurrence
+  "session_rescheduled",     // DM moved an occurrence
+] as const;
+export type NotificationType = typeof NOTIFICATION_TYPES[number];
+
+// Notifications (scheduling audit stage 3): one row per delivered notification
+// per target user. Doubles as the in-app feed AND the engine's idempotency
+// ledger — dedupeKey is unique, so a re-run (or catch-up after downtime) can
+// never double-send.
+export const notifications = pgTable("notifications", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(), // target
+  teamId: varchar("team_id").notNull(),
+  type: text("type").notNull().$type<NotificationType>(),
+  occurrenceKey: varchar("occurrence_key"), // session occurrence, when applicable
+  stage: varchar("stage"), // e.g. "t7" | "t3" | "t1" | "day0"
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  url: text("url"), // in-app deep link
+  pushSent: boolean("push_sent").default(false).notNull(),
+  readAt: timestamp("read_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -313,7 +377,7 @@ export const importRuns = pgTable("import_runs", {
   teamId: varchar("team_id").notNull(),
   sourceSystem: text("source_system").notNull(), // e.g., "NUCLINO"
   createdByUserId: varchar("created_by_user_id").notNull(),
-  status: text("status").notNull().$type<ImportRunStatus>().default("completed"),
+  status: text("status").notNull().$type<ImportRunStatus>().default("pending"),
   options: json("options").$type<ImportRunOptions>(),
   stats: json("stats").$type<ImportRunStats>(),
   createdAt: timestamp("created_at").defaultNow(),
@@ -554,6 +618,8 @@ export const insertDiceRollSchema = createInsertSchema(diceRolls).omit({ id: tru
 export const insertBacklinkSchema = createInsertSchema(backlinks).omit({ id: true, createdAt: true });
 export const insertUserAvailabilitySchema = createInsertSchema(userAvailability).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertSessionOverrideSchema = createInsertSchema(sessionOverrides).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertPushSubscriptionSchema = createInsertSchema(pushSubscriptions).omit({ id: true, createdAt: true, lastSeenAt: true });
+export const insertNotificationSchema = createInsertSchema(notifications).omit({ id: true, createdAt: true });
 export const insertImportRunSchema = createInsertSchema(importRuns).omit({ id: true, createdAt: true });
 export const insertNoteImportSnapshotSchema = createInsertSchema(noteImportSnapshots).omit({ id: true, createdAt: true });
 // PRD-016: Enrichment insert schemas
@@ -585,6 +651,10 @@ export type UserAvailability = typeof userAvailability.$inferSelect;
 export type InsertUserAvailability = z.infer<typeof insertUserAvailabilitySchema>;
 export type SessionOverride = typeof sessionOverrides.$inferSelect;
 export type InsertSessionOverride = z.infer<typeof insertSessionOverrideSchema>;
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+export type InsertPushSubscription = z.infer<typeof insertPushSubscriptionSchema>;
+export type Notification = typeof notifications.$inferSelect;
+export type InsertNotification = z.infer<typeof insertNotificationSchema>;
 export type ImportRun = typeof importRuns.$inferSelect;
 export type InsertImportRun = z.infer<typeof insertImportRunSchema>;
 export type NoteImportSnapshot = typeof noteImportSnapshots.$inferSelect;

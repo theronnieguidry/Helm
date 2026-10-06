@@ -80,7 +80,7 @@ export default function JoinTeamPage() {
         <CardHeader className="text-center">
           <div className="flex items-center justify-center gap-2 mb-4">
             <Dices className="h-8 w-8 text-primary" />
-            <span className="text-xl font-medium">Quest Keeper</span>
+            <span className="text-xl font-medium">Helm</span>
           </div>
           {status === "success" ? (
             <>

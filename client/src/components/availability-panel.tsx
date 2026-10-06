@@ -14,11 +14,17 @@ import { Trash2 } from "lucide-react";
 import type { Team, UserAvailability } from "@shared/schema";
 import { getTimezoneAbbreviation } from "@/components/timezone-select";
 
+export interface AvailabilityResponse {
+  status: "available" | "unavailable";
+  startTime?: string;
+  endTime?: string;
+}
+
 interface AvailabilityPanelProps {
   team: Team;
   selectedDate: Date;
   existingAvailability?: UserAvailability;
-  onSave: (data: { startTime: string; endTime: string }) => void;
+  onSave: (data: AvailabilityResponse) => void;
   onDelete?: () => void;
   onClose: () => void;
   isPending?: boolean;
@@ -66,8 +72,12 @@ export default function AvailabilityPanel({
     return `${endHour.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
   };
 
-  const [mode, setMode] = useState<"regular" | "custom">(
-    existingAvailability && existingAvailability.startTime !== regularSessionTime
+  // Scheduling audit S1: "I can't make it" is a first-class response — the
+  // only way silence can mean "hasn't responded" is if busy people can say no.
+  const [mode, setMode] = useState<"regular" | "custom" | "unavailable">(
+    existingAvailability?.status === "unavailable"
+      ? "unavailable"
+      : existingAvailability && existingAvailability.startTime !== regularSessionTime
       ? "custom"
       : "regular"
   );
@@ -79,7 +89,7 @@ export default function AvailabilityPanel({
   );
 
   const handleModeChange = (value: string) => {
-    const newMode = value as "regular" | "custom";
+    const newMode = value as "regular" | "custom" | "unavailable";
     setMode(newMode);
     if (newMode === "regular") {
       setStartTime(regularSessionTime);
@@ -88,7 +98,11 @@ export default function AvailabilityPanel({
   };
 
   const handleSave = () => {
-    onSave({ startTime, endTime });
+    if (mode === "unavailable") {
+      onSave({ status: "unavailable" });
+    } else {
+      onSave({ status: "available", startTime, endTime });
+    }
   };
 
   // PRD-009A: Only show time and timezone, not the weekday (to avoid confusion on non-regular days)
@@ -127,6 +141,20 @@ export default function AvailabilityPanel({
               >
                 Specify a custom time range
               </label>
+            </div>
+          </div>
+          <div className="flex items-start space-x-2">
+            <RadioGroupItem value="unavailable" id="unavailable" />
+            <div className="grid gap-1.5 leading-none">
+              <label
+                htmlFor="unavailable"
+                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+              >
+                I can't make it
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Lets the group know not to wait on you
+              </p>
             </div>
           </div>
         </RadioGroup>

@@ -13,7 +13,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { User, MapPin, ScrollText, Plus, X, Link2, ExternalLink } from "lucide-react";
+import { User, MapPin, ScrollText, Plus, X, Link2, ExternalLink, Undo2, Check } from "lucide-react";
 import type { DetectedEntity, EntityType } from "@shared/entity-detection";
 import type { Note, NoteType } from "@shared/schema";
 
@@ -64,17 +64,29 @@ export const ENTITY_TO_NOTE_TYPE: Record<EntityType, NoteType> = {
   quest: "quest",
 };
 
+// PRD-047 FR-2: linked evidence snippets are truncated for inline display.
+const LINKED_SNIPPET_MAX_LENGTH = 120;
+
+export function truncateSnippet(snippet: string, maxLength = LINKED_SNIPPET_MAX_LENGTH): string {
+  const trimmed = snippet.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength - 1)}…` : trimmed;
+}
+
 interface EntitySuggestionCardProps {
   entity: DetectedEntity;
   reclassifiedType?: NoteType;
   matchingNotes: Note[];
   isSelected: boolean;
   isLinked?: boolean;
+  /** PRD-047 FR-2: evidence snippet shown inline once linked. */
+  linkedSnippet?: string;
   onSelect: () => void;
   onAccept: (noteType: NoteType) => void;
   onDismiss: () => void;
   onReclassify: (newType: NoteType) => void;
   onLinkToExisting: (noteId: string) => void;
+  /** PRD-047 FR-3: undo removes the backlink created by Link. */
+  onUndoLink?: () => void;
   onOpenNote?: (noteId: string) => void;
 }
 
@@ -84,11 +96,13 @@ export function EntitySuggestionCard({
   matchingNotes,
   isSelected,
   isLinked = false,
+  linkedSnippet,
   onSelect,
   onAccept,
   onDismiss,
   onReclassify,
   onLinkToExisting,
+  onUndoLink,
   onOpenNote,
 }: EntitySuggestionCardProps) {
   const Icon = ENTITY_TYPE_ICONS[entity.type];
@@ -150,6 +164,16 @@ export function EntitySuggestionCard({
         </div>
       )}
 
+      {/* PRD-047 FR-2: evidence snippet shown inline after linking */}
+      {isLinked && linkedSnippet && (
+        <p
+          className="mt-2 text-xs text-muted-foreground italic"
+          data-testid="linked-snippet"
+        >
+          "{truncateSnippet(linkedSnippet)}"
+        </p>
+      )}
+
       {/* Reclassify dropdown */}
       <div className="mt-2">
         <Select
@@ -183,8 +207,23 @@ export function EntitySuggestionCard({
                 className="flex-1 h-7 text-xs"
                 disabled
               >
+                <Check className="h-3 w-3 mr-1" />
                 Linked
               </Button>
+              {onUndoLink && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs px-2"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onUndoLink();
+                  }}
+                >
+                  <Undo2 className="h-3 w-3 mr-1" />
+                  Undo
+                </Button>
+              )}
               {onOpenNote && (
                 <Button
                   size="sm"

@@ -1,7 +1,7 @@
 # PRD-009A — Session Availability: Remove Day Name from “Regular Session Time” Label
 
 ## Story Status
-Proposed (Sub-PRD to PRD-009-session-availability-add-ability-to-create-availability.md)
+Implemented (Sub-PRD to PRD-009)
 
 ---
 

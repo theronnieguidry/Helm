@@ -6,7 +6,8 @@ export interface MemberAvailability {
   userId: string;
   displayName: string;
   profileImageUrl?: string;
-  status: "full" | "partial" | "no_response";
+  // Audit S1: "unavailable" (explicit no) is distinct from "no_response" (silence)
+  status: "full" | "partial" | "unavailable" | "no_response";
   timeWindow?: string; // "7:00 PM - 11:00 PM EDT"
   isDM?: boolean;
 }
@@ -103,13 +104,14 @@ function Section({
   compact,
 }: {
   title: string;
-  color: "green" | "yellow" | "muted";
+  color: "green" | "yellow" | "red" | "muted";
   children: React.ReactNode;
   compact?: boolean;
 }) {
   const colorClasses = {
     green: "text-green-600 dark:text-green-400",
     yellow: "text-yellow-600 dark:text-yellow-400",
+    red: "text-red-600 dark:text-red-400",
     muted: "text-muted-foreground",
   };
 
@@ -135,11 +137,13 @@ export default function TeamAvailabilityList({
 }: TeamAvailabilityListProps) {
   const fullMembers = members.filter((m) => m.status === "full");
   const partialMembers = members.filter((m) => m.status === "partial");
+  const unavailableMembers = members.filter((m) => m.status === "unavailable");
   const noResponseMembers = members.filter((m) => m.status === "no_response");
 
   const hasAnyMembers =
     fullMembers.length > 0 ||
     partialMembers.length > 0 ||
+    unavailableMembers.length > 0 ||
     noResponseMembers.length > 0;
 
   if (!hasAnyMembers) {
@@ -162,6 +166,13 @@ export default function TeamAvailabilityList({
       {partialMembers.length > 0 && (
         <Section title="Partial" color="yellow" compact={compact}>
           {partialMembers.map((m) => (
+            <MemberRow key={m.userId} member={m} compact={compact} />
+          ))}
+        </Section>
+      )}
+      {unavailableMembers.length > 0 && (
+        <Section title="Can't Make It" color="red" compact={compact}>
+          {unavailableMembers.map((m) => (
             <MemberRow key={m.userId} member={m} compact={compact} />
           ))}
         </Section>

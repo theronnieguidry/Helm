@@ -3,7 +3,7 @@
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { render, screen, within, waitFor } from '@testing-library/react';
+import { render, screen, within, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import NotesPage from './notes';
@@ -18,6 +18,20 @@ class MockResizeObserver {
 
 beforeAll(() => {
   vi.stubGlobal('ResizeObserver', MockResizeObserver);
+  // jsdom has no matchMedia; M9's useIsMobile needs it. Desktop by default.
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
 });
 
 afterAll(() => {
@@ -39,6 +53,8 @@ vi.mock('@/components/ui/resizable', () => ({
 vi.mock('wouter', () => ({
   useLocation: () => ['/', vi.fn()],
   useSearch: () => '',
+  // F47 deep-link support reads /notes/:id; default to no match in tests
+  useRoute: () => [false, null],
 }));
 
 // Mock toast hook
@@ -106,6 +122,8 @@ const mockTeam = {
   recurrenceAnchorDate: null,
   minAttendanceThreshold: null,
   defaultSessionDurationMinutes: null,
+  aiEnabled: false,
+  aiEnabledAt: null,
 };
 
 const mockNotes = [
@@ -181,6 +199,8 @@ function renderWithProviders(ui: React.ReactElement) {
 describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // M5 draft mirrors persist in localStorage; isolate tests from each other
+    localStorage.clear();
     mockApiRequest.mockResolvedValue({
       json: () => Promise.resolve({ id: 'new-note-id' }),
     });
@@ -386,6 +406,225 @@ describe('NotesPage - Two-Panel Layout (PRD-019)', () => {
           })
         );
       }, { timeout: 2000 });
+    });
+  });
+
+  // P1-1 (PRD-008 FR-3/FR-4): session title and date are editable
+  // P2-1 (PRD-004 FR-5): quest status badges + filter in the quest list
+  describe('Quest Status in Lists (PRD-004 FR-5)', () => {
+    it('shows a status badge on quest rows', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(screen.getByText('Quests'));
+      const questTitle = await screen.findByText('Find the Missing Artifact');
+      // note-3 fixture has questStatus 'active' — badge rendered inside the row
+      const row = questTitle.closest('button');
+      expect(within(row!).getByText('Active')).toBeInTheDocument();
+    });
+
+    it('filters quests by status via the chips', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(screen.getByText('Quests'));
+      await screen.findByTestId('quest-status-filter');
+
+      // Filter to a status with no quests
+      await user.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.queryByText('Find the Missing Artifact')).not.toBeInTheDocument();
+      expect(screen.getByText('No items')).toBeInTheDocument();
+
+      // Back to All restores the quest
+      await user.click(screen.getByRole('button', { name: 'All' }));
+      expect(await screen.findByText('Find the Missing Artifact')).toBeInTheDocument();
+    });
+  });
+
+  describe('Session Title and Date Editing (PRD-008)', () => {
+    it('shows an editable title input and session date field for a selected session log', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(await screen.findByText('2024-01-15 — The Beginning'));
+
+      await waitFor(() => {
+        const titleInput = screen.getByLabelText('Title') as HTMLInputElement;
+        expect(titleInput).toBeInTheDocument();
+        expect(titleInput.value).toBe('2024-01-15 — The Beginning');
+      });
+
+      const dateInput = screen.getByLabelText('Session Date') as HTMLInputElement;
+      expect(dateInput).toBeInTheDocument();
+      expect(dateInput.value).toBe('2024-01-15');
+    });
+
+    it('persists a session date change via PATCH', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(await screen.findByText('2024-01-15 — The Beginning'));
+
+      const dateInput = await screen.findByLabelText('Session Date');
+      fireEvent.change(dateInput, { target: { value: '2024-01-10' } });
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'PATCH',
+          '/api/teams/team-1/notes/note-1',
+          expect.objectContaining({
+            sessionDate: expect.stringContaining('2024-01-10'),
+          })
+        );
+      });
+    });
+  });
+
+  // P1-6 (gap F43): switching notes flushes the unsaved draft for the note
+  // being left instead of silently dropping it.
+  describe('Draft Flush on Note Switch (PRD-019 FR-4)', () => {
+    it('PATCHes the previous note with its unsaved draft when switching selection', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // Open the session note and type into it
+      await user.click(await screen.findByText('2024-01-15 — The Beginning'));
+      const textarea = await screen.findByLabelText('Content');
+      fireEvent.change(textarea, {
+        target: { value: 'Our adventure begins... and continues!' },
+      });
+
+      // Immediately switch to another note (inside the debounce window)
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'PATCH',
+          '/api/teams/team-1/notes/note-1',
+          expect.objectContaining({
+            content: 'Our adventure begins... and continues!',
+          })
+        );
+      });
+    });
+  });
+
+  // M3 (MVP audit): the Private/Team toggle writes isPrivate
+  describe('Privacy Toggle (M3)', () => {
+    it('shows a Team toggle for an own note and PATCHes isPrivate on click', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.click(screen.getByText('Areas'));
+      await user.click(screen.getByText('Tavern of the Rusty Blade'));
+
+      // note-2 is team-visible, so the toggle reads "Team"
+      const toggle = await screen.findByRole('button', { name: /^team$/i });
+      await user.click(toggle);
+
+      await waitFor(() => {
+        expect(mockApiRequest).toHaveBeenCalledWith(
+          'PATCH',
+          '/api/teams/team-1/notes/note-2',
+          { isPrivate: true }
+        );
+      });
+    });
+  });
+
+  // M8 (MVP audit): search must reveal its matches
+  describe('Search Reveal (M8)', () => {
+    it('force-expands collapsed categories with matches and shows a content snippet', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      // People is collapsed by default; 'wizard' matches only the NPC's content
+      expect(screen.queryByText('Gandalf the Grey')).not.toBeInTheDocument();
+
+      await user.type(screen.getByPlaceholderText('Search notes...'), 'wizard');
+
+      expect(await screen.findByText('Gandalf the Grey')).toBeInTheDocument();
+      // The row explains why it matched
+      expect(screen.getByText(/A mysterious wizard/)).toBeInTheDocument();
+    });
+
+    it('shows a global empty state when nothing matches', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      await user.type(
+        screen.getByPlaceholderText('Search notes...'),
+        'zzz-no-such-thing'
+      );
+
+      expect(await screen.findByText(/No matches for/)).toBeInTheDocument();
+    });
+  });
+
+  // M5 (MVP audit): drafts are mirrored locally so a crash can't lose them
+  describe('Draft Mirror (M5)', () => {
+    it('writes the unsaved draft to localStorage as the user types', async () => {
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const contentInput = screen.getByLabelText('Session Notes');
+      fireEvent.change(contentInput, { target: { value: 'Backed up locally' } });
+
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      await waitFor(() => {
+        const raw = localStorage.getItem(`note-draft:team-1:today:${todayStr}`);
+        expect(raw).toBeTruthy();
+        expect(JSON.parse(raw!).content).toBe('Backed up locally');
+      });
+    });
+
+    it('restores a lingering today-draft after a reload', async () => {
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      localStorage.setItem(
+        `note-draft:team-1:today:${todayStr}`,
+        JSON.stringify({ title: todayStr, content: 'Recovered text', savedAt: Date.now() })
+      );
+
+      renderWithProviders(<NotesPage team={mockTeam} />);
+
+      const contentInput = (await screen.findByLabelText(
+        'Session Notes'
+      )) as HTMLTextAreaElement;
+      await waitFor(() => {
+        expect(contentInput.value).toBe('Recovered text');
+      });
+    });
+  });
+
+  // M9 (MVP audit): single-pane flow below the mobile breakpoint
+  describe('Mobile Single-Pane (M9)', () => {
+    it('renders the editor with a Back button instead of split panels', async () => {
+      const originalWidth = window.innerWidth;
+      Object.defineProperty(window, 'innerWidth', {
+        writable: true,
+        configurable: true,
+        value: 500,
+      });
+      const user = userEvent.setup();
+      try {
+        renderWithProviders(<NotesPage team={mockTeam} />);
+
+        // Capture-first: the Today editor is the initial pane
+        const backButton = await screen.findByRole('button', { name: /all notes/i });
+        expect(screen.queryByTestId('resizable-panel-group')).not.toBeInTheDocument();
+        expect(screen.getByLabelText('Session Notes')).toBeInTheDocument();
+
+        // Back reaches the list pane
+        await user.click(backButton);
+        expect(await screen.findByPlaceholderText('Search notes...')).toBeInTheDocument();
+        expect(screen.queryByLabelText('Session Notes')).not.toBeInTheDocument();
+      } finally {
+        Object.defineProperty(window, 'innerWidth', {
+          writable: true,
+          configurable: true,
+          value: originalWidth,
+        });
+      }
     });
   });
 

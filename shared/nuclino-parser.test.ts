@@ -172,6 +172,7 @@ describe("extractNuclinoLinks", () => {
       targetFilename: "Kettle 03183b35.md",
       targetPageId: "03183b35",
       fullMatch: "[Kettle](<Kettle 03183b35.md?n>)",
+      lineSnippet: "See [Kettle](<Kettle 03183b35.md?n>) for more info.",
     });
   });
 
@@ -671,8 +672,8 @@ describe("summarizeNuclinoLinks", () => {
         content: "",
         contentRaw: "",
         links: [
-          { text: "B", targetFilename: "B 22222222.md", targetPageId: "22222222", fullMatch: "" },
-          { text: "C", targetFilename: "C 33333333.md", targetPageId: "33333333", fullMatch: "" },
+          { text: "B", targetFilename: "B 22222222.md", targetPageId: "22222222", fullMatch: "", lineSnippet: "" },
+          { text: "C", targetFilename: "C 33333333.md", targetPageId: "33333333", fullMatch: "", lineSnippet: "" },
         ],
         isEmpty: false,
       },
@@ -683,7 +684,7 @@ describe("summarizeNuclinoLinks", () => {
         content: "",
         contentRaw: "",
         links: [
-          { text: "C", targetFilename: "C 33333333.md", targetPageId: "33333333", fullMatch: "" },
+          { text: "C", targetFilename: "C 33333333.md", targetPageId: "33333333", fullMatch: "", lineSnippet: "" },
         ],
         isEmpty: false,
       },
@@ -693,6 +694,114 @@ describe("summarizeNuclinoLinks", () => {
     expect(stats.totalLinks).toBe(3);
     expect(stats.pagesWithLinks).toBe(2);
     expect(stats.uniqueTargetPages).toBe(2);
+  });
+
+  // PRD-050 FR-5: link resolution stats
+  it("counts resolved and unresolved links against known pages", () => {
+    const pages: NuclinoPage[] = [
+      {
+        filename: "A 11111111.md",
+        sourcePageId: "11111111",
+        title: "A",
+        content: "",
+        contentRaw: "",
+        links: [
+          // B exists in the export -> resolved
+          { text: "B", targetFilename: "B 22222222.md", targetPageId: "22222222", fullMatch: "", lineSnippet: "" },
+          // Missing page -> unresolved (twice, to test counting)
+          { text: "Ghost", targetFilename: "Ghost 99999999.md", targetPageId: "99999999", fullMatch: "", lineSnippet: "" },
+          { text: "Ghost", targetFilename: "Ghost 99999999.md", targetPageId: "99999999", fullMatch: "", lineSnippet: "" },
+        ],
+        isEmpty: false,
+      },
+      {
+        filename: "B 22222222.md",
+        sourcePageId: "22222222",
+        title: "B",
+        content: "",
+        contentRaw: "",
+        links: [],
+        isEmpty: false,
+      },
+    ];
+
+    const stats = summarizeNuclinoLinks(pages);
+    expect(stats.resolvedLinks).toBe(1);
+    expect(stats.unresolvedLinks).toBe(2);
+    expect(stats.topUnresolvedTargets).toEqual([
+      { target: "Ghost 99999999.md", count: 2 },
+    ]);
+  });
+
+  it("caps topUnresolvedTargets at 10 sorted by count", () => {
+    const links = Array.from({ length: 15 }, (_, i) => {
+      const id = `${i}`.padStart(8, "a");
+      return {
+        text: `Missing ${i}`,
+        targetFilename: `Missing ${i} ${id}.md`,
+        targetPageId: id,
+        fullMatch: "",
+        lineSnippet: "",
+      };
+    });
+    const pages: NuclinoPage[] = [
+      {
+        filename: "A 11111111.md",
+        sourcePageId: "11111111",
+        title: "A",
+        content: "",
+        contentRaw: "",
+        links,
+        isEmpty: false,
+      },
+    ];
+
+    const stats = summarizeNuclinoLinks(pages);
+    expect(stats.unresolvedLinks).toBe(15);
+    expect(stats.topUnresolvedTargets).toHaveLength(10);
+  });
+});
+
+describe("PRD-050 link evidence extraction", () => {
+  it("captures the markdown line containing the link as lineSnippet", () => {
+    const content = [
+      "# Heading",
+      "Intro paragraph.",
+      "- The party should visit [Kettle](<Kettle 03183b35.md?n>) at the tavern.",
+      "Closing line.",
+    ].join("\n");
+
+    const links = extractNuclinoLinks(content);
+    expect(links).toHaveLength(1);
+    expect(links[0].lineSnippet).toBe(
+      "- The party should visit [Kettle](<Kettle 03183b35.md?n>) at the tavern."
+    );
+  });
+
+  it("truncates very long lines in lineSnippet", () => {
+    const longPrefix = "x".repeat(300);
+    const content = `${longPrefix} [Kettle](<Kettle 03183b35.md?n>)`;
+    const links = extractNuclinoLinks(content);
+    expect(links).toHaveLength(1);
+    expect(links[0].lineSnippet.length).toBeLessThanOrEqual(240);
+    expect(links[0].lineSnippet.endsWith("...")).toBe(true);
+  });
+
+  it("never leaves angle brackets or ?n in normalized targets (FR-1 invariant)", () => {
+    const adversarialTargets = [
+      "<Kettle 03183b35.md?n>",
+      "Kettle 03183b35.md?n",
+      "./Kettle%2003183b35.md",
+      "<Some%20Page%20abcdef12.md?n>",
+    ];
+
+    for (const target of adversarialTargets) {
+      const links = extractNuclinoLinks(`[Text](${target})`);
+      expect(links).toHaveLength(1);
+      expect(links[0].targetFilename).not.toMatch(/[<>]/);
+      expect(links[0].targetFilename).not.toContain("?n");
+      expect(links[0].targetPageId).toMatch(/^[a-f0-9]{8}$/);
+    }
   });
 });
 
